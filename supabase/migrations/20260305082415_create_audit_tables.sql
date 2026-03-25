@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS "seed_urls" (
     "id" TEXT NOT NULL DEFAULT gen_random_uuid()::text,
     "site_id" TEXT NOT NULL,
     "url" TEXT NOT NULL,
+    "page_type" TEXT,
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "seed_urls_pkey" PRIMARY KEY ("id")
@@ -135,89 +136,185 @@ ALTER TABLE "seed_urls" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "audit_runs" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "audit_results" ENABLE ROW LEVEL SECURITY;
 
--- Create policies for authenticated users to manage their own data
--- Note: These are permissive policies - adjust based on your auth requirements
+-- Create policies for public access
+-- Note: This allows anonymous access for the SEO audit tool
 
-CREATE POLICY "Users can view sites"
-  ON "sites" FOR SELECT
-  TO authenticated
-  USING (true);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies WHERE policyname = 'Public can view sites'
+  ) THEN
+    CREATE POLICY "Public can view sites"
+      ON "sites" FOR SELECT
+      USING (true);
+  END IF;
+END $$;
 
-CREATE POLICY "Users can create sites"
-  ON "sites" FOR INSERT
-  TO authenticated
-  WITH CHECK (true);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies WHERE policyname = 'Public can create sites'
+  ) THEN
+    CREATE POLICY "Public can create sites"
+      ON "sites" FOR INSERT
+      WITH CHECK (true);
+  END IF;
+END $$;
 
-CREATE POLICY "Users can update sites"
-  ON "sites" FOR UPDATE
-  TO authenticated
-  USING (true)
-  WITH CHECK (true);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies WHERE policyname = 'Public can update sites'
+  ) THEN
+    CREATE POLICY "Public can update sites"
+      ON "sites" FOR UPDATE
+      USING (true)
+      WITH CHECK (true);
+  END IF;
+END $$;
 
-CREATE POLICY "Users can delete sites"
-  ON "sites" FOR DELETE
-  TO authenticated
-  USING (true);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies WHERE policyname = 'Public can delete sites'
+  ) THEN
+    CREATE POLICY "Public can delete sites"
+      ON "sites" FOR DELETE
+      USING (true);
+  END IF;
+END $$;
 
-CREATE POLICY "Users can view seed_urls"
-  ON "seed_urls" FOR SELECT
-  TO authenticated
-  USING (true);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies WHERE policyname = 'Public can view seed_urls'
+  ) THEN
+    CREATE POLICY "Public can view seed_urls"
+      ON "seed_urls" FOR SELECT
+      USING (true);
+  END IF;
+END $$;
 
-CREATE POLICY "Users can create seed_urls"
-  ON "seed_urls" FOR INSERT
-  TO authenticated
-  WITH CHECK (true);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies WHERE policyname = 'Public can create seed_urls'
+  ) THEN
+    CREATE POLICY "Public can create seed_urls"
+      ON "seed_urls" FOR INSERT
+      WITH CHECK (true);
+  END IF;
+END $$;
 
-CREATE POLICY "Users can update seed_urls"
-  ON "seed_urls" FOR UPDATE
-  TO authenticated
-  USING (true)
-  WITH CHECK (true);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies WHERE policyname = 'Public can update seed_urls'
+  ) THEN
+    CREATE POLICY "Public can update seed_urls"
+      ON "seed_urls" FOR UPDATE
+      USING (true)
+      WITH CHECK (true);
+  END IF;
+END $$;
 
-CREATE POLICY "Users can delete seed_urls"
-  ON "seed_urls" FOR DELETE
-  TO authenticated
-  USING (true);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies WHERE policyname = 'Public can delete seed_urls'
+  ) THEN
+    CREATE POLICY "Public can delete seed_urls"
+      ON "seed_urls" FOR DELETE
+      USING (true);
+  END IF;
+END $$;
 
-CREATE POLICY "Users can view audit_runs"
-  ON "audit_runs" FOR SELECT
-  TO authenticated
-  USING (true);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies WHERE policyname = 'Public can view audit_runs'
+  ) THEN
+    CREATE POLICY "Public can view audit_runs"
+      ON "audit_runs" FOR SELECT
+      USING (true);
+  END IF;
+END $$;
 
-CREATE POLICY "Users can create audit_runs"
-  ON "audit_runs" FOR INSERT
-  TO authenticated
-  WITH CHECK (true);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies WHERE policyname = 'Public can create audit_runs'
+  ) THEN
+    CREATE POLICY "Public can create audit_runs"
+      ON "audit_runs" FOR INSERT
+      WITH CHECK (true);
+  END IF;
+END $$;
 
-CREATE POLICY "Users can update audit_runs"
-  ON "audit_runs" FOR UPDATE
-  TO authenticated
-  USING (true)
-  WITH CHECK (true);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies WHERE policyname = 'Public can update audit_runs'
+  ) THEN
+    CREATE POLICY "Public can update audit_runs"
+      ON "audit_runs" FOR UPDATE
+      USING (true)
+      WITH CHECK (true);
+  END IF;
+END $$;
 
-CREATE POLICY "Users can delete audit_runs"
-  ON "audit_runs" FOR DELETE
-  TO authenticated
-  USING (true);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies WHERE policyname = 'Public can delete audit_runs'
+  ) THEN
+    CREATE POLICY "Public can delete audit_runs"
+      ON "audit_runs" FOR DELETE
+      USING (true);
+  END IF;
+END $$;
 
-CREATE POLICY "Users can view audit_results"
-  ON "audit_results" FOR SELECT
-  TO authenticated
-  USING (true);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies WHERE policyname = 'Public can view audit_results'
+  ) THEN
+    CREATE POLICY "Public can view audit_results"
+      ON "audit_results" FOR SELECT
+      USING (true);
+  END IF;
+END $$;
 
-CREATE POLICY "Users can create audit_results"
-  ON "audit_results" FOR INSERT
-  TO authenticated
-  WITH CHECK (true);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies WHERE policyname = 'Public can create audit_results'
+  ) THEN
+    CREATE POLICY "Public can create audit_results"
+      ON "audit_results" FOR INSERT
+      WITH CHECK (true);
+  END IF;
+END $$;
 
-CREATE POLICY "Users can update audit_results"
-  ON "audit_results" FOR UPDATE
-  TO authenticated
-  USING (true)
-  WITH CHECK (true);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies WHERE policyname = 'Public can update audit_results'
+  ) THEN
+    CREATE POLICY "Public can update audit_results"
+      ON "audit_results" FOR UPDATE
+      USING (true)
+      WITH CHECK (true);
+  END IF;
+END $$;
 
-CREATE POLICY "Users can delete audit_results"
-  ON "audit_results" FOR DELETE
-  TO authenticated
-  USING (true);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies WHERE policyname = 'Public can delete audit_results'
+  ) THEN
+    CREATE POLICY "Public can delete audit_results"
+      ON "audit_results" FOR DELETE
+      USING (true);
+  END IF;
+END $$;
