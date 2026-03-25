@@ -1,11 +1,16 @@
 [phases.setup]
+# Use Node 20 LTS
 nixPkgs = ["nodejs_20"]
 
 [phases.install]
+# Use ci for reproducible installs
 cmds = ["npm ci"]
 
 [phases.build]
+# 1. Build Vite frontend (→ dist/)
+# 2. Compile backend TypeScript (→ backend/dist/)
 cmds = ["npm run build"]
 
 [start]
+# Serve with the Express server (serves static Vite build + API)
 cmd = "node server/index.js"

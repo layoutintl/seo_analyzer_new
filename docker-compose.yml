@@ -4,18 +4,33 @@ services:
   app:
     build:
       context: .
+      dockerfile: Dockerfile
     ports:
-      - "${PORT:-3000}:${PORT:-3000}"
+      - "${PORT:-3000}:3000"
     environment:
-      - PORT=${PORT:-3000}
+      # Server
+      - PORT=3000
       - NODE_ENV=production
-      - VITE_SUPABASE_URL=${VITE_SUPABASE_URL}
-      - VITE_SUPABASE_ANON_KEY=${VITE_SUPABASE_ANON_KEY}
+      # Database — use non-VITE_ names for server-side runtime
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
+      # Keep VITE_ aliases for backward compatibility (both are read by the code)
+      - VITE_SUPABASE_URL=${SUPABASE_URL}
+      - VITE_SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
+      # Scrapling sidecar URL (points to sibling container)
       - SCRAPLING_SIDECAR_URL=http://scrapling:5000
+      # Optional: PageSpeed Insights API key
+      - PAGESPEED_API_KEY=${PAGESPEED_API_KEY:-}
     depends_on:
       scrapling:
-        condition: service_started
+        condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
 
   scrapling:
     build:
@@ -29,4 +44,5 @@ services:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
       interval: 30s
       timeout: 5s
+      start_period: 10s
       retries: 3

@@ -1,5 +1,6 @@
 node_modules
 dist
+backend/dist
 .git
 .gitignore
 .env
@@ -14,4 +15,4 @@ npm-debug.log*
 supabase
 README.md
 docker-compose.yml
-Dockerfile
+scrapling-sidecar

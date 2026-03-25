@@ -54,10 +54,13 @@ app.get('/health', async (_req, res) => {
 
 // --------------- API routes ---------------
 app.get('/api/health', async (_req, res) => {
+  const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
   res.json({
     status: 'ok',
     env: {
-      SUPABASE_URL_SET: !!process.env.VITE_SUPABASE_URL,
+      SUPABASE_CONFIGURED: !!supabaseUrl,
+      SUPABASE_URL: supabaseUrl ? `${supabaseUrl.slice(0, 30)}...` : null,
+      SCRAPLING_SIDECAR_URL: process.env.SCRAPLING_SIDECAR_URL || null,
       NODE_ENV: process.env.NODE_ENV || 'not set',
       PORT: process.env.PORT || 'not set',
     },
