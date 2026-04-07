@@ -8,6 +8,7 @@
  */
 import { Router } from 'express';
 import { analyzeNewsSitemap } from '../lib/modules/news-sitemap.js';
+import { detectNewsSitemapComplianceIssue } from '../lib/modules/news-sitemap-compliance.js';
 import { analyzeArticleSchema } from '../lib/modules/article-schema.js';
 import { analyzeCanonicalConsistency } from '../lib/modules/canonical-consistency.js';
 import { analyzeCoreWebVitals } from '../lib/modules/core-web-vitals.js';
@@ -41,7 +42,7 @@ newsSeoRouter.post('/', async (req, res) => {
   const startTime = Date.now();
 
   try {
-    const { url } = req.body || {};
+    const { url, gsc } = req.body || {};
 
     if (!url) {
       return res.status(400).json({
@@ -101,6 +102,20 @@ newsSeoRouter.post('/', async (req, res) => {
       analyzeFreshness(html, url, httpHeaders),
     ]);
 
+    // 2b. Attach compliance issue to news_sitemap result
+    if (newsSitemap.status === 'fulfilled') {
+      const nsr = newsSitemap.value;
+      const complianceIssue = detectNewsSitemapComplianceIssue({
+        sitemapType: (nsr.news_urls ?? 0) > 0 ? 'news' : 'general',
+        submittedUrls:   gsc?.submitted_urls    ?? null,
+        indexedUrls:     gsc?.indexed_urls      ?? null,
+        newsIndexedUrls: gsc?.news_indexed_urls ?? null,
+        webIndexedUrls:  gsc?.web_indexed_urls  ?? null,
+        newsSitemapResult: nsr,
+      });
+      nsr.compliance_issue = complianceIssue;
+    }
+
     // 3. Assemble response
     const modules = {};
     const moduleResults = [
@@ -153,6 +168,58 @@ newsSeoRouter.post('/', async (req, res) => {
       status: 'error',
       error: error.message,
       modules: {},
+      duration_ms: Date.now() - startTime,
+    });
+  }
+});
+
+// ── POST /api/news-seo/compliance ─────────────────────────────────
+// Standalone compliance check — fetches & analyzes the sitemap, then
+// runs the compliance detector with optional GSC override data.
+//
+// Body: { url: string, gsc?: { submitted_urls, indexed_urls,
+//                               news_indexed_urls, web_indexed_urls } }
+newsSeoRouter.post('/compliance', async (req, res) => {
+  const startTime = Date.now();
+
+  try {
+    const { url, gsc } = req.body || {};
+
+    if (!url) {
+      return res.status(400).json({ error: 'url is required' });
+    }
+
+    // Run sitemap analysis
+    const newsSitemapResult = await analyzeNewsSitemap(url);
+
+    const complianceIssue = detectNewsSitemapComplianceIssue({
+      sitemapType:     (newsSitemapResult.news_urls ?? 0) > 0 ? 'news' : 'general',
+      submittedUrls:   gsc?.submitted_urls    ?? null,
+      indexedUrls:     gsc?.indexed_urls      ?? null,
+      newsIndexedUrls: gsc?.news_indexed_urls ?? null,
+      webIndexedUrls:  gsc?.web_indexed_urls  ?? null,
+      newsSitemapResult,
+    });
+
+    return res.json({
+      url,
+      issue: complianceIssue,
+      reason: complianceIssue ? null : 'Not a news sitemap or fully compliant',
+      sitemap_summary: {
+        sitemaps_found: newsSitemapResult.sitemaps_found,
+        news_sitemaps:  newsSitemapResult.news_sitemaps?.length ?? 0,
+        total_urls:     newsSitemapResult.total_urls,
+        news_urls:      newsSitemapResult.news_urls,
+        freshness_score: newsSitemapResult.freshness_score,
+        status:         newsSitemapResult.status,
+      },
+      duration_ms: Date.now() - startTime,
+    });
+  } catch (error) {
+    console.error('news-sitemap-compliance error:', error);
+    return res.status(500).json({
+      url: req.body?.url || '',
+      error: error.message,
       duration_ms: Date.now() - startTime,
     });
   }
