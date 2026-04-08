@@ -27,29 +27,63 @@ const SITEMAP_TIMEOUT = 20_000;
 const MAX_CHILD_SITEMAPS = 5;
 const MAX_CHILD_SIZE = 5 * 1024 * 1024; // 5 MB
 
-const UA_BROWSER = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+// User-Agent strings — keep Chrome version recent to avoid bot detection
+const UA_BROWSER  = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 const UA_GOOGLEBOT = 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)';
 
-// Priority-ordered discovery paths (manager specification):
-//   1. robots.txt Sitemap directives  (handled separately)
-//   2. /sitemaps/sitemap_0.xml        (news publisher primary)
-//   3. /sitemap_0.xml                 (news publisher alternate)
-//   4. /sitemap.xml                   (standard default)
-//   5. /sitemap_index.xml             (common index variant)
-//   6. /news-sitemap.xml              (Google News)
-//   7–11. additional common paths
+// Full browser-like header set.
+// Many WAFs (Cloudflare, Imperva) check for missing Accept-Language /
+// Accept-Encoding / Sec-Fetch-* — a bare UA-only request is a strong bot signal.
+const BROWSER_HEADERS: Record<string, string> = {
+  'Accept':           'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept-Language':  'en-US,en;q=0.9,ar;q=0.8',
+  'Accept-Encoding':  'gzip, deflate, br',
+  'Cache-Control':    'no-cache',
+  'Pragma':           'no-cache',
+  'Sec-Fetch-Dest':   'document',
+  'Sec-Fetch-Mode':   'navigate',
+  'Sec-Fetch-Site':   'none',
+  'Sec-Fetch-User':   '?1',
+  'Upgrade-Insecure-Requests': '1',
+};
+
+// Lighter header set for Googlebot — adding Sec-Fetch-* to a Googlebot UA
+// looks inconsistent; Googlebot only sends basic headers.
+const GOOGLEBOT_HEADERS: Record<string, string> = {
+  'Accept':           'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept-Language':  'en-US,en;q=0.5',
+  'Accept-Encoding':  'gzip, deflate, br',
+};
+
+// General sitemap discovery paths — checked in priority order.
+// Step 1 is always robots.txt (handled separately).
+// Step 2 onwards are well-known paths for the GENERAL (non-news) sitemap.
+// News-specific paths are intentionally excluded here — they are handled
+// by the dedicated checkNewsSitemapPresence() probe below.
 const PRIORITY_SITEMAP_PATHS = [
-  '/sitemaps/sitemap_0.xml',
-  '/sitemap_0.xml',
-  '/sitemap.xml',
-  '/sitemap_index.xml',
-  '/news-sitemap.xml',
+  '/sitemaps/sitemap_0.xml',   // news publisher primary (most common)
+  '/sitemap_0.xml',             // news publisher alternate
+  '/sitemap.xml',               // standard default
+  '/sitemap_index.xml',         // common index variant
   '/sitemap-index.xml',
   '/sitemaps.xml',
   '/sitemaps/sitemap.xml',
   '/post-sitemap.xml',
   '/page-sitemap.xml',
   '/sitemap/sitemap.xml',
+];
+
+// News-sitemap-specific paths — always probed INDEPENDENTLY of the main
+// sitemap check. A blocked general sitemap does not prevent this probe,
+// and these paths are NOT duplicated in PRIORITY_SITEMAP_PATHS.
+const NEWS_SITEMAP_PATHS = [
+  '/news-sitemap.xml',
+  '/news-sitemap-index.xml',
+  '/sitemap-news.xml',
+  '/sitemaps/news-sitemap.xml',
+  '/sitemap/news-sitemap.xml',
+  '/google-news-sitemap.xml',
+  '/rss-news-sitemap.xml',
 ];
 
 // ── SSRF guard ──────────────────────────────────────────────────
@@ -101,13 +135,16 @@ async function safeFetch(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
+  const ua = opts.userAgent ?? UA_BROWSER;
+  const extraHeaders = ua === UA_GOOGLEBOT ? GOOGLEBOT_HEADERS : BROWSER_HEADERS;
+
   try {
     const res = await fetch(url, {
       redirect: 'follow',
       signal: controller.signal,
       headers: {
-        'User-Agent': opts.userAgent ?? UA_BROWSER,
-        Accept: 'application/xml, text/xml, text/html',
+        'User-Agent': ua,
+        ...extraHeaders,
       },
     });
 
@@ -311,9 +348,34 @@ interface SitemapResult {
   retryLog?: string[];  // UA retry attempts log
 }
 
+/** Dedicated Google News sitemap probe result — always checked independently. */
+export interface NewsSitemapResult {
+  /** Was at least one news sitemap URL accessible and valid? */
+  status: 'FOUND' | 'BLOCKED' | 'NOT_FOUND' | 'ERROR';
+  /** The URL where a news sitemap was found (or the last tried URL). */
+  url: string | null;
+  /** HTTP status returned for the found/blocked URL. */
+  httpStatus: number | null;
+  /** Does the XML contain the Google News namespace (`xmlns:news=`)? */
+  hasNewsNamespace: boolean;
+  /** Does the XML have at least one `<news:publication_date>` tag? */
+  hasPublicationDate: boolean;
+  /** Does the XML have at least one `<news:title>` tag? */
+  hasNewsTitle: boolean;
+  /** Does the XML have at least one `<news:publication>` tag? */
+  hasPublicationTag: boolean;
+  /** Total `<url>` entries found in the news sitemap (0 if not found). */
+  urlCount: number;
+  /** All paths that were probed (https and http variants). */
+  probedUrls: string[];
+  /** Human-readable notes about the probe result. */
+  notes: string[];
+}
+
 export interface SiteChecksResult {
   robots: RobotsResult;
   sitemap: SitemapResult;
+  newsSitemap: NewsSitemapResult;
 }
 
 // ── Stage 1: robots.txt discovery ───────────────────────────────
@@ -846,6 +908,145 @@ function checkCoverage(sitemap: SitemapResult): void {
   }
 }
 
+// ── Dedicated Google News sitemap probe ──────────────────────────
+//
+// Runs independently of the main sitemap discovery so that a blocked or
+// missing general sitemap does not mask an accessible news sitemap.
+// Also runs even when the main sitemap discovery succeeds, because the
+// primary sitemap may be a sitemapindex with no news-specific entries.
+
+async function checkNewsSitemapPresence(origin: string): Promise<NewsSitemapResult> {
+  const result: NewsSitemapResult = {
+    status: 'NOT_FOUND',
+    url: null,
+    httpStatus: null,
+    hasNewsNamespace: false,
+    hasPublicationDate: false,
+    hasNewsTitle: false,
+    hasPublicationTag: false,
+    urlCount: 0,
+    probedUrls: [],
+    notes: [],
+  };
+
+  // Build deduplicated probe list (https first, http fallback)
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+
+  for (const path of NEWS_SITEMAP_PATHS) {
+    const https = origin.startsWith('https://')
+      ? `${origin}${path}`
+      : `${origin.replace(/^http:\/\//, 'https://')}${path}`;
+    const http = origin.startsWith('http://')
+      ? `${origin}${path}`
+      : `${origin.replace(/^https:\/\//, 'http://')}${path}`;
+
+    if (!seen.has(https)) { seen.add(https); candidates.push(https); }
+    if (!seen.has(http))  { seen.add(http);  candidates.push(http); }
+  }
+
+  result.probedUrls = candidates;
+  console.log(`[news-sitemap] Probing ${candidates.length} candidates`);
+
+  let lastBlockedUrl: string | null = null;
+  let lastBlockedStatus: number | null = null;
+
+  for (const url of candidates) {
+    if (!isSafeUrl(url)) continue;
+
+    let res: Awaited<ReturnType<typeof safeFetch>>;
+    try {
+      res = await safeFetch(url, SITEMAP_TIMEOUT, { maxBytes: MAX_CHILD_SIZE });
+    } catch {
+      continue;
+    }
+
+    // On 403 with UA_BROWSER, retry with Googlebot
+    if ((res.status === 401 || res.status === 403)) {
+      try {
+        const r2 = await safeFetch(url, SITEMAP_TIMEOUT, {
+          maxBytes: MAX_CHILD_SIZE,
+          userAgent: UA_GOOGLEBOT,
+        });
+        if (r2.ok) { res = r2; }
+      } catch { /* keep original */ }
+    }
+
+    if (res.status === 401 || res.status === 403) {
+      lastBlockedUrl = url;
+      lastBlockedStatus = res.status;
+      console.log(`[news-sitemap] BLOCKED: ${url} → HTTP ${res.status}`);
+      continue; // keep trying other paths
+    }
+
+    if (res.status === 404 || res.status === 410) {
+      console.log(`[news-sitemap] NOT_FOUND: ${url} → HTTP ${res.status}`);
+      continue;
+    }
+
+    if (!res.ok) {
+      console.log(`[news-sitemap] ERROR: ${url} → HTTP ${res.status}`);
+      continue;
+    }
+
+    // Successful fetch — inspect the body
+    const body = res.text;
+    const root = xmlRoot(body);
+    if (!root) {
+      console.log(`[news-sitemap] INVALID_XML: ${url} — no valid root element`);
+      continue;
+    }
+
+    const hasNewsNS = body.includes('xmlns:news=') || body.includes('<news:');
+    const hasPubDate = /<news:publication_date[\s>]/i.test(body);
+    const hasTitle   = /<news:title[\s>]/i.test(body);
+    const hasPubTag  = /<news:publication[\s>]/i.test(body);
+    const urlCount   = countUrlEntries(body);
+
+    result.status           = 'FOUND';
+    result.url              = url;
+    result.httpStatus       = res.status;
+    result.hasNewsNamespace = hasNewsNS;
+    result.hasPublicationDate = hasPubDate;
+    result.hasNewsTitle     = hasTitle;
+    result.hasPublicationTag = hasPubTag;
+    result.urlCount         = urlCount;
+
+    if (!hasNewsNS) {
+      result.notes.push('Sitemap found but missing Google News namespace (xmlns:news=). Add the news namespace for Google News indexing.');
+    }
+    if (!hasPubDate) {
+      result.notes.push('Missing <news:publication_date> — required for Google News freshness signals.');
+    }
+    if (!hasTitle) {
+      result.notes.push('Missing <news:title> — required in every news sitemap entry.');
+    }
+    if (!hasPubTag) {
+      result.notes.push('Missing <news:publication> block — required for Google News publisher identification.');
+    }
+    if (urlCount === 0) {
+      result.notes.push('News sitemap contains 0 <url> entries.');
+    }
+
+    console.log(`[news-sitemap] FOUND: ${url} — news_ns=${hasNewsNS}, pub_date=${hasPubDate}, title=${hasTitle}, urls=${urlCount}`);
+    return result;
+  }
+
+  // Nothing found — report BLOCKED if we hit access-denied, else NOT_FOUND
+  if (lastBlockedUrl) {
+    result.status     = 'BLOCKED';
+    result.url        = lastBlockedUrl;
+    result.httpStatus = lastBlockedStatus;
+    result.notes.push(`News sitemap access blocked (HTTP ${lastBlockedStatus}). Ensure sitemap URLs are publicly accessible without authentication.`);
+    console.log(`[news-sitemap] Final status: BLOCKED at ${lastBlockedUrl}`);
+  } else {
+    result.notes.push(`No news sitemap found at any of ${NEWS_SITEMAP_PATHS.length} standard paths. For Google News publishers, add a /news-sitemap.xml with the news namespace.`);
+    console.log('[news-sitemap] Final status: NOT_FOUND');
+  }
+
+  return result;
+}
+
 // ── Main entry point ────────────────────────────────────────────
 
 export async function runSiteChecks(domain: string): Promise<SiteChecksResult> {
@@ -871,10 +1072,22 @@ export async function runSiteChecks(domain: string): Promise<SiteChecksResult> {
         errors: ['Invalid domain'],
         warnings: [],
       },
+      newsSitemap: {
+        status: 'ERROR',
+        url: null,
+        httpStatus: null,
+        hasNewsNamespace: false,
+        hasPublicationDate: false,
+        hasNewsTitle: false,
+        hasPublicationTag: false,
+        urlCount: 0,
+        probedUrls: [],
+        notes: ['Invalid domain'],
+      },
     };
   }
 
-  // Stage 1: robots.txt
+  // Stage 1: robots.txt (must complete first — feeds sitemap discovery)
   let robotsResult: RobotsResult;
   try {
     robotsResult = await checkRobots(origin);
@@ -888,18 +1101,43 @@ export async function runSiteChecks(domain: string): Promise<SiteChecksResult> {
     };
   }
 
-  // Stages 2+3: sitemap discovery → accessibility → validation
+  // Stages 2+3 + news-sitemap probe run in parallel.
+  // The news-sitemap check is independent — it does NOT stop if the general
+  // sitemap is blocked, and it validates Google News namespace + required tags.
+  const [sitemapSettled, newsSitemapSettled] = await Promise.allSettled([
+    discoverAndValidateSitemaps(origin, robotsResult.sitemapsFound),
+    checkNewsSitemapPresence(origin),
+  ]);
+
   let sitemapResult: SitemapResult;
-  try {
-    sitemapResult = await discoverAndValidateSitemaps(origin, robotsResult.sitemapsFound);
-  } catch (err: unknown) {
+  if (sitemapSettled.status === 'fulfilled') {
+    sitemapResult = sitemapSettled.value;
+  } else {
     sitemapResult = {
       status: 'ERROR',
       discoveredFrom: 'none',
       validatedRoot: null,
       type: null,
-      errors: [`Unexpected error: ${err instanceof Error ? err.message : 'unknown'}`],
+      errors: [`Unexpected error: ${sitemapSettled.reason instanceof Error ? sitemapSettled.reason.message : 'unknown'}`],
       warnings: [],
+    };
+  }
+
+  let newsSitemapResult: NewsSitemapResult;
+  if (newsSitemapSettled.status === 'fulfilled') {
+    newsSitemapResult = newsSitemapSettled.value;
+  } else {
+    newsSitemapResult = {
+      status: 'ERROR',
+      url: null,
+      httpStatus: null,
+      hasNewsNamespace: false,
+      hasPublicationDate: false,
+      hasNewsTitle: false,
+      hasPublicationTag: false,
+      urlCount: 0,
+      probedUrls: [],
+      notes: [`Unexpected error: ${newsSitemapSettled.reason instanceof Error ? newsSitemapSettled.reason.message : 'unknown'}`],
     };
   }
 
@@ -910,5 +1148,5 @@ export async function runSiteChecks(domain: string): Promise<SiteChecksResult> {
     // Non-critical
   }
 
-  return { robots: robotsResult, sitemap: sitemapResult };
+  return { robots: robotsResult, sitemap: sitemapResult, newsSitemap: newsSitemapResult };
 }

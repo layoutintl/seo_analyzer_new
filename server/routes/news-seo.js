@@ -14,28 +14,32 @@ import { analyzeCanonicalConsistency } from '../lib/modules/canonical-consistenc
 import { analyzeCoreWebVitals } from '../lib/modules/core-web-vitals.js';
 import { analyzeAmp } from '../lib/modules/amp-validator.js';
 import { analyzeFreshness } from '../lib/modules/freshness-analyzer.js';
+import { smartFetch } from '../lib/scrapling-client.js';
 
 export const newsSeoRouter = Router();
 
-const FETCH_TIMEOUT = 15000;
+const FETCH_TIMEOUT_S = 15; // seconds (for smartFetch)
 
+/**
+ * Fetch a page with full browser-like headers.
+ * On 403: automatically retries via the Scrapling sidecar (headless browser)
+ * when it is available, giving a second chance against WAF/Cloudflare blocks.
+ */
 async function fetchPage(url) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
+  const result = await smartFetch(url, { timeout: FETCH_TIMEOUT_S });
 
-  try {
-    const res = await fetch(url, {
-      redirect: 'follow',
-      signal: controller.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; SEO-Analyzer/1.0)',
-        'Accept': 'text/html,application/xhtml+xml',
-      },
-    });
-    return res;
-  } finally {
-    clearTimeout(timer);
-  }
+  // smartFetch returns { html, status, headers, url, source }
+  // Wrap it in a fetch-Response-like object so existing callers work unchanged.
+  return {
+    ok:      result.status >= 200 && result.status < 300,
+    status:  result.status,
+    url:     result.url,
+    source:  result.source,   // 'scrapling' | 'native'
+    text:    async () => result.html,
+    headers: {
+      get: (name) => result.headers?.[name.toLowerCase()] ?? null,
+    },
+  };
 }
 
 newsSeoRouter.post('/', async (req, res) => {

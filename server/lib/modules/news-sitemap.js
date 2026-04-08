@@ -23,14 +23,36 @@ const SITEMAP_PATHS = [
   '/sitemap.xml.gz',
 ];
 
-async function fetchWithTimeout(url, timeoutMs = FETCH_TIMEOUT) {
+// Browser-like headers — bare User-Agent requests are caught by most WAFs.
+const FETCH_HEADERS = {
+  'User-Agent':     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Accept':         'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept-Language':'en-US,en;q=0.9,ar;q=0.8',
+  'Accept-Encoding':'gzip, deflate, br',
+  'Cache-Control':  'no-cache',
+};
+
+const GOOGLEBOT_HEADERS = {
+  'User-Agent':     'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+  'Accept':         'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept-Language':'en-US,en;q=0.5',
+  'Accept-Encoding':'gzip, deflate, br',
+};
+
+async function fetchWithTimeout(url, timeoutMs = FETCH_TIMEOUT, headers = FETCH_HEADERS) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
+      redirect: 'follow',
       signal: controller.signal,
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SEO-Analyzer/1.0)' },
+      headers,
     });
+    // On 403 retry with Googlebot UA (many news sites whitelist Googlebot)
+    if ((res.status === 401 || res.status === 403) && headers !== GOOGLEBOT_HEADERS) {
+      clearTimeout(timer);
+      return fetchWithTimeout(url, timeoutMs, GOOGLEBOT_HEADERS);
+    }
     return res;
   } finally {
     clearTimeout(timer);
