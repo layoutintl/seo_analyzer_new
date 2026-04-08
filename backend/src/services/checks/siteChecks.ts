@@ -27,8 +27,33 @@ const SITEMAP_TIMEOUT = 20_000;
 const MAX_CHILD_SITEMAPS = 5;
 const MAX_CHILD_SIZE = 5 * 1024 * 1024; // 5 MB
 
-const UA_BROWSER = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+// User-Agent strings — keep Chrome version recent to avoid bot detection
+const UA_BROWSER  = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 const UA_GOOGLEBOT = 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)';
+
+// Full browser-like header set.
+// Many WAFs (Cloudflare, Imperva) check for missing Accept-Language /
+// Accept-Encoding / Sec-Fetch-* — a bare UA-only request is a strong bot signal.
+const BROWSER_HEADERS: Record<string, string> = {
+  'Accept':           'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept-Language':  'en-US,en;q=0.9,ar;q=0.8',
+  'Accept-Encoding':  'gzip, deflate, br',
+  'Cache-Control':    'no-cache',
+  'Pragma':           'no-cache',
+  'Sec-Fetch-Dest':   'document',
+  'Sec-Fetch-Mode':   'navigate',
+  'Sec-Fetch-Site':   'none',
+  'Sec-Fetch-User':   '?1',
+  'Upgrade-Insecure-Requests': '1',
+};
+
+// Lighter header set for Googlebot — adding Sec-Fetch-* to a Googlebot UA
+// looks inconsistent; Googlebot only sends basic headers.
+const GOOGLEBOT_HEADERS: Record<string, string> = {
+  'Accept':           'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept-Language':  'en-US,en;q=0.5',
+  'Accept-Encoding':  'gzip, deflate, br',
+};
 
 // General sitemap discovery paths — checked in priority order.
 // Step 1 is always robots.txt (handled separately).
@@ -110,13 +135,16 @@ async function safeFetch(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
+  const ua = opts.userAgent ?? UA_BROWSER;
+  const extraHeaders = ua === UA_GOOGLEBOT ? GOOGLEBOT_HEADERS : BROWSER_HEADERS;
+
   try {
     const res = await fetch(url, {
       redirect: 'follow',
       signal: controller.signal,
       headers: {
-        'User-Agent': opts.userAgent ?? UA_BROWSER,
-        Accept: 'application/xml, text/xml, text/html',
+        'User-Agent': ua,
+        ...extraHeaders,
       },
     });
 

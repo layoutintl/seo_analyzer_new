@@ -196,12 +196,22 @@ export function calculateOrphanRisk(internalLinkCount, pageDepth) {
   return Math.min(risk, 100);
 }
 
+// ── Shared browser-like headers for all remote checks ──────────
+// Plain fetch() with no headers is a strong bot signal for WAFs.
+const FETCH_HEADERS = {
+  'User-Agent':     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Accept':         'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept-Language':'en-US,en;q=0.9,ar;q=0.8',
+  'Accept-Encoding':'gzip, deflate, br',
+  'Cache-Control':  'no-cache',
+};
+
 // ── Remote checks (require network) ────────────────────────────
 
 export async function fetchRobotsTxt(baseUrl) {
   try {
     const u = new URL(baseUrl);
-    const res = await fetch(`${u.protocol}//${u.host}/robots.txt`);
+    const res = await fetch(`${u.protocol}//${u.host}/robots.txt`, { headers: FETCH_HEADERS });
     if (res.ok) return { valid: true, content: (await res.text()).substring(0, 500) };
   } catch { /* ignore */ }
   return { valid: false, content: null };
@@ -211,7 +221,7 @@ export async function checkSitemapXml(baseUrl) {
   try {
     const u = new URL(baseUrl);
     const url = `${u.protocol}//${u.host}/sitemap.xml`;
-    const res = await fetch(url);
+    const res = await fetch(url, { headers: FETCH_HEADERS });
     return { valid: res.ok, location: res.ok ? url : null };
   } catch { /* ignore */ }
   return { valid: false, location: null };
