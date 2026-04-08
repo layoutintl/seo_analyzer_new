@@ -870,62 +870,141 @@ function CheckGroupCard({ group, defaultOpen, filter }: { group: CheckGroup; def
 /** Message panel shown when the crawler couldn't access the page (401/403/404/5xx) */
 function CrawlGatePanel({ title, url, row }: { title: string; url: string; row: AuditResultRow }) {
   const [open, setOpen] = useState(true);
-  const pageState = (row.data?.page_state as string) ?? 'FETCH_ERROR';
-  const httpStatus = row.data?.httpStatus as number | undefined;
-  const errorMsg = row.data?.error as string | undefined;
+  const pageState        = (row.data?.page_state as string) ?? 'FETCH_ERROR';
+  const httpStatus       = row.data?.httpStatus as number | undefined;
+  const confidence       = (row.data?.blocked_confidence as string | undefined) ?? '';
+  const blockedReason    = row.data?.blocked_reason as string | undefined;
+  const profilesTried    = (row.data?.profiles_tried as Array<{
+    profile: string; status: number; failure_kind: string; cf_challenge?: boolean;
+  }> | undefined) ?? [];
 
-  const stateConfig: Record<string, { badge: string; badgeColor: string; icon: React.ReactNode; bg: string; border: string }> = {
-    CRAWLER_BLOCKED: { badge: 'BLOCKED', badgeColor: 'bg-orange-100 text-orange-700', icon: <Shield className="w-5 h-5 text-orange-500" />, bg: 'bg-orange-50', border: 'border-orange-200' },
-    NOT_FOUND: { badge: 'NOT FOUND', badgeColor: 'bg-red-100 text-red-700', icon: <XCircle className="w-5 h-5 text-red-500" />, bg: 'bg-red-50', border: 'border-red-200' },
-    SERVER_ERROR: { badge: 'SERVER ERROR', badgeColor: 'bg-red-100 text-red-700', icon: <AlertCircle className="w-5 h-5 text-red-500" />, bg: 'bg-red-50', border: 'border-red-200' },
-    FETCH_ERROR: { badge: 'ERROR', badgeColor: 'bg-red-100 text-red-700', icon: <AlertCircle className="w-5 h-5 text-red-500" />, bg: 'bg-red-50', border: 'border-red-200' },
+  type StateKey = 'CRAWLER_BLOCKED' | 'NOT_FOUND' | 'SERVER_ERROR' | 'FETCH_ERROR';
+  const stateConfig: Record<StateKey, { badge: string; badgeColor: string; icon: React.ReactNode; bg: string; border: string }> = {
+    CRAWLER_BLOCKED: { badge: 'BLOCKED',      badgeColor: 'bg-orange-100 text-orange-700', icon: <Shield className="w-5 h-5 text-orange-500" />,      bg: 'bg-orange-50', border: 'border-orange-200' },
+    NOT_FOUND:       { badge: 'NOT FOUND',    badgeColor: 'bg-red-100 text-red-700',    icon: <XCircle className="w-5 h-5 text-red-500" />,       bg: 'bg-red-50',    border: 'border-red-200'    },
+    SERVER_ERROR:    { badge: 'SERVER ERROR', badgeColor: 'bg-red-100 text-red-700',    icon: <AlertCircle className="w-5 h-5 text-red-500" />,   bg: 'bg-red-50',    border: 'border-red-200'    },
+    FETCH_ERROR:     { badge: 'FETCH ERROR',  badgeColor: 'bg-red-100 text-red-700',    icon: <AlertCircle className="w-5 h-5 text-red-500" />,   bg: 'bg-red-50',    border: 'border-red-200'    },
   };
-  const cfg = stateConfig[pageState] ?? stateConfig.FETCH_ERROR;
+  const cfg = stateConfig[pageState as StateKey] ?? stateConfig.FETCH_ERROR;
+
+  // Confidence pill styling
+  const confidencePill: Record<string, string> = {
+    HIGH:   'bg-red-100 text-red-700',
+    MEDIUM: 'bg-orange-100 text-orange-700',
+    LOW:    'bg-yellow-100 text-yellow-700',
+  };
+
+  // Contextual explanation based on what actually happened
+  const allWaf = profilesTried.length > 0 && profilesTried.every(p => p.cf_challenge || p.failure_kind === 'waf_challenge');
+  const allTimeout = profilesTried.length > 0 && profilesTried.every(p => p.failure_kind === 'timeout' || p.failure_kind === 'ssl_error' || p.failure_kind === 'dns_error');
+
+  let contextNote = '';
+  if (pageState === 'CRAWLER_BLOCKED') {
+    if (allWaf) {
+      contextNote = 'Cloudflare / WAF challenge detected on all profiles. The page is accessible to real browsers but blocks server-side crawlers by IP and TLS fingerprint. Enable the Scrapling headless-browser sidecar to attempt JS-challenge bypass.';
+    } else if (allTimeout) {
+      contextNote = 'All fetch attempts timed out or failed with network errors — this may be a temporary issue. No SEO penalties were applied.';
+    } else if (confidence === 'HIGH') {
+      contextNote = `All ${profilesTried.length} crawler profiles (Chrome, Firefox, Googlebot) received 403. The site enforces strict IP-based or bot-protection rules. SEO checks could not be performed.`;
+    } else if (confidence === 'MEDIUM') {
+      contextNote = 'Multiple profiles were denied. The site may have inconsistent bot-protection rules. Consider retrying or checking robots.txt for crawler permissions.';
+    } else {
+      contextNote = 'Access was denied. On-page SEO checks were skipped for this page.';
+    }
+  } else if (pageState === 'NOT_FOUND') {
+    contextNote = 'The URL returned 404 or 410 — the page does not exist. Verify the URL is correct and that the page has not been removed.';
+  } else if (pageState === 'SERVER_ERROR') {
+    contextNote = 'The server returned a 5xx error. This is typically a temporary issue. Try the audit again or check server logs.';
+  } else if (allTimeout) {
+    contextNote = 'The page could not be reached — possible DNS failure, SSL error, or temporary network issue. No SEO penalties were applied.';
+  }
+
+  const failureKindLabel: Record<string, string> = {
+    access_denied:  '403 Access Denied',
+    waf_challenge:  '403/200 WAF Challenge',
+    not_found:      '404 Not Found',
+    server_error:   '5xx Server Error',
+    timeout:        'Timeout',
+    ssl_error:      'SSL/TLS Error',
+    dns_error:      'DNS Error',
+    parser_failure: 'Parse Error',
+    empty_body:     'Empty Body',
+    redirect_loop:  'Redirect Loop',
+    success:        '✓ Success',
+  };
 
   return (
     <div className="bg-white rounded-2xl shadow-lg overflow-hidden">
       <button onClick={() => setOpen(!open)} className="w-full flex items-center gap-3 px-6 py-4 text-left hover:bg-slate-50 transition-colors">
         {open ? <ChevronDown className="w-5 h-5 text-slate-400 shrink-0" /> : <ChevronRight className="w-5 h-5 text-slate-400 shrink-0" />}
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 flex-wrap">
             <h3 className="text-base font-bold text-slate-900">{title}</h3>
             <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${cfg.badgeColor}`}>{cfg.badge}</span>
+            {confidence && confidence !== 'NONE' && (
+              <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${confidencePill[confidence] ?? 'bg-slate-100 text-slate-600'}`}>
+                {confidence} confidence
+              </span>
+            )}
+            {httpStatus ? <span className="text-xs text-slate-400 font-mono">HTTP {httpStatus}</span> : null}
           </div>
           <p className="text-xs text-slate-500 mt-0.5 truncate font-mono">{url}</p>
         </div>
       </button>
+
       {open && (
-        <div className="border-t border-slate-100 px-6 py-4">
+        <div className="border-t border-slate-100 px-6 py-4 space-y-3">
+
+          {/* Main status box */}
           <div className={`flex items-start gap-3 p-4 rounded-xl border ${cfg.bg} ${cfg.border}`}>
             {cfg.icon}
             <div className="flex-1">
               <p className="text-sm font-semibold text-slate-800">
-                {errorMsg || `Page state: ${pageState}`}
-                {httpStatus ? ` (HTTP ${httpStatus})` : ''}
+                On-page SEO checks skipped — crawler could not retrieve page content.
               </p>
-              <p className="text-xs text-slate-600 mt-1">
-                On-page SEO checks were skipped because the crawler could not access the page content.
-                No canonical, schema, title, content, or heading checks were performed.
-              </p>
-              {pageState === 'CRAWLER_BLOCKED' && (
-                <p className="text-xs text-slate-500 mt-2">
-                  Check if bot protection or IP-based blocking is preventing access. Ensure your server responds with HTTP 200 for legitimate crawlers.
-                </p>
-              )}
-              {pageState === 'NOT_FOUND' && (
-                <p className="text-xs text-slate-500 mt-2">
-                  Verify that the URL is correct and the page exists. A 404/410 means the content is not available at this address.
-                </p>
-              )}
-              {pageState === 'SERVER_ERROR' && (
-                <p className="text-xs text-slate-500 mt-2">
-                  The server returned an error. This is typically a temporary issue. Try again later or check server logs.
-                </p>
+              {contextNote && (
+                <p className="text-xs text-slate-600 mt-1 leading-relaxed">{contextNote}</p>
               )}
             </div>
           </div>
+
+          {/* Profile evidence table */}
+          {profilesTried.length > 0 && (
+            <div>
+              <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Fetch attempts</p>
+              <div className="rounded-lg border border-slate-200 overflow-hidden">
+                <table className="w-full text-xs">
+                  <thead className="bg-slate-50 text-slate-500">
+                    <tr>
+                      <th className="text-left px-3 py-2 font-medium">Profile</th>
+                      <th className="text-left px-3 py-2 font-medium">Result</th>
+                      <th className="text-left px-3 py-2 font-medium">WAF</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {profilesTried.map((p, i) => (
+                      <tr key={i} className="bg-white">
+                        <td className="px-3 py-2 font-mono text-slate-700">{p.profile}</td>
+                        <td className={`px-3 py-2 ${p.failure_kind === 'success' ? 'text-green-600' : 'text-red-600'}`}>
+                          {failureKindLabel[p.failure_kind] ?? p.failure_kind}
+                        </td>
+                        <td className="px-3 py-2">
+                          {p.cf_challenge ? <span className="text-orange-600 font-semibold">CF ✓</span> : <span className="text-slate-300">—</span>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {blockedReason && (
+                <p className="text-xs text-slate-400 mt-1.5 italic">{blockedReason}</p>
+              )}
+            </div>
+          )}
+
+          {/* Recommendations */}
           {row.recommendations && row.recommendations.length > 0 && (
-            <div className="mt-3 space-y-1.5">
+            <div className="space-y-1.5">
               {row.recommendations.map((r, i) => (
                 <div key={i} className="flex items-start gap-2 text-xs bg-amber-50 border border-amber-200 px-3 py-2 rounded-lg">
                   <span className="font-semibold text-amber-700 shrink-0">{r.priority}</span>
