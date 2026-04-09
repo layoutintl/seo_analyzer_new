@@ -31,6 +31,11 @@ const MAX_CHILD_SIZE = 5 * 1024 * 1024; // 5 MB
 import { UA_BROWSER, UA_GOOGLEBOT, BROWSER_HEADERS, GOOGLEBOT_HEADERS, isBotProtectionPage } from '../fetch/fetchEngine.js';
 import { gunzipSync } from 'node:zlib';
 
+// Scrapling sidecar URL — same env var as fetchEngine; undefined → no fallback.
+const SCRAPLING_SIDECAR_URL = (
+  typeof process !== 'undefined' ? process.env['SCRAPLING_SIDECAR_URL'] : undefined
+)?.replace(/\/+$/, '');
+
 const UA_FIREFOX = 'Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0';
 const FIREFOX_HEADERS: Record<string, string> = {
   'Accept':                    'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -169,6 +174,68 @@ async function safeFetch(
     return { ...empty, status };
   } finally {
     clearTimeout(timer);
+  }
+}
+
+// ── Scrapling sidecar fallback ───────────────────────────────────
+//
+// Called only when all native UA profiles return BOT_PROTECTION or BLOCKED.
+// Uses 'stealth' mode so the sidecar goes straight to the headless browser
+// rather than wasting time on an initial standard attempt we already know fails.
+
+async function tryScraplingForContent(
+  url: string,
+  sidecarBase: string,
+  timeoutMs = SITEMAP_TIMEOUT,
+): Promise<FetchResult | null> {
+  const empty: FetchResult = { ok: false, status: 0, text: '', contentType: '', finalUrl: url, redirected: false };
+  try {
+    console.log(`[scrapling-sitemap] stealth attempt for ${url}`);
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs + 5_000);
+
+    const res = await fetch(`${sidecarBase}/fetch`, {
+      method: 'POST',
+      signal: ctrl.signal,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, timeout: Math.floor(timeoutMs / 1000), mode: 'stealth' }),
+    });
+    clearTimeout(timer);
+
+    if (!res.ok) {
+      console.log(`[scrapling-sitemap] sidecar HTTP ${res.status} for ${url}`);
+      return null;
+    }
+
+    const data = await res.json() as {
+      html?: string; status?: number;
+      headers?: Record<string, string>; url?: string;
+      challenge_detected?: boolean; bypassed?: boolean;
+      error?: string;
+    };
+
+    if (data.error || data.challenge_detected) {
+      console.log(`[scrapling-sitemap] sidecar returned challenge/error for ${url}: ${data.error ?? 'challenge_detected'}`);
+      return null;
+    }
+
+    const body = data.html ?? '';
+    const status = data.status ?? 200;
+    const contentType = data.headers?.['content-type'] ?? '';
+    const finalUrl = data.url ?? url;
+
+    console.log(`[scrapling-sitemap] stealth OK — HTTP ${status}, body length ${body.length} for ${url}`);
+    return {
+      ok: status >= 200 && status < 300 && body.length > 0,
+      status,
+      text: body,
+      contentType,
+      finalUrl,
+      redirected: finalUrl !== url,
+    };
+  } catch (err: unknown) {
+    console.log(`[scrapling-sitemap] sidecar call failed: ${err instanceof Error ? err.message : err}`);
+    return null;
   }
 }
 
@@ -536,6 +603,21 @@ async function fetchSitemapWithRetry(
 
   const res3Challenge = res3.ok && isBotProtectionPage(res3.text);
   if (res3.ok && !res3Challenge) return { res: res3, retryLog };
+
+  // ── Layer 4: Scrapling sidecar (stealth/headless) ────────────────────────
+  // Triggered when all native profiles returned a WAF challenge or were denied.
+  // Only runs when SCRAPLING_SIDECAR_URL is configured.
+  const anyChallenge = [res1, res2, res3].some(r => r.ok && isBotProtectionPage(r.text));
+  const anyDenied    = [res1, res2, res3].some(r => r.status === 401 || r.status === 403);
+  if ((anyChallenge || anyDenied) && SCRAPLING_SIDECAR_URL) {
+    retryLog.push(`scrapling-stealth: attempting`);
+    const scrapling = await tryScraplingForContent(url, SCRAPLING_SIDECAR_URL, SITEMAP_TIMEOUT);
+    if (scrapling) {
+      retryLog.push(`scrapling-stealth: HTTP ${scrapling.status}`);
+      return { res: scrapling, retryLog };
+    }
+    retryLog.push('scrapling-stealth: failed');
+  }
 
   // All profiles denied or challenged — return the one with most information
   // (prefer a response that has a body over one that doesn't)
@@ -1108,6 +1190,38 @@ async function checkNewsSitemapPresence(origin: string): Promise<NewsSitemapResu
     return result;
   }
 
+  // ── Scrapling sidecar fallback for news sitemap ──────────────────────────
+  // When all paths were bot-protected, try the sidecar once on the most
+  // promising URL (the one that returned BOT_PROTECTION rather than a hard block).
+  if (lastBotProtectionUrl && SCRAPLING_SIDECAR_URL) {
+    console.log(`[news-sitemap] All paths challenged — trying Scrapling stealth for ${lastBotProtectionUrl}`);
+    const scrapling = await tryScraplingForContent(lastBotProtectionUrl, SCRAPLING_SIDECAR_URL, SITEMAP_TIMEOUT);
+    if (scrapling?.ok && scrapling.text) {
+      const body = scrapling.text;
+      const root = xmlRoot(body);
+      if (root) {
+        const hasNewsNS  = body.includes('xmlns:news=') || body.includes('<news:');
+        const hasPubDate = /<news:publication_date[\s>]/i.test(body);
+        const hasTitle   = /<news:title[\s>]/i.test(body);
+        const hasPubTag  = /<news:publication[\s>]/i.test(body);
+        const urlCount   = countUrlEntries(body);
+
+        result.status             = 'FOUND';
+        result.url                = lastBotProtectionUrl;
+        result.httpStatus         = scrapling.status;
+        result.hasNewsNamespace   = hasNewsNS;
+        result.hasPublicationDate = hasPubDate;
+        result.hasNewsTitle       = hasTitle;
+        result.hasPublicationTag  = hasPubTag;
+        result.urlCount           = urlCount;
+        result.notes.push('News sitemap content was retrieved via headless browser bypass (Scrapling sidecar).');
+        console.log(`[news-sitemap] FOUND via Scrapling stealth: ${lastBotProtectionUrl}`);
+        return result;
+      }
+    }
+    console.log(`[news-sitemap] Scrapling stealth did not yield valid XML for ${lastBotProtectionUrl}`);
+  }
+
   // Nothing found — differentiate hard access-denial from challenge-page blocks
   if (lastBlockedUrl) {
     result.status     = 'BLOCKED';
@@ -1119,7 +1233,7 @@ async function checkNewsSitemapPresence(origin: string): Promise<NewsSitemapResu
     result.status     = 'BOT_PROTECTION';
     result.url        = lastBotProtectionUrl;
     result.httpStatus = lastBlockedStatus;
-    result.notes.push('News sitemap URL returned a bot-protection challenge page (HTTP 200 with challenge body) — search engines and this tool cannot read the real sitemap.');
+    result.notes.push('News sitemap URL returned a bot-protection challenge page — and the headless-browser bypass did not succeed. Consider configuring Scrapling sidecar for improved WAF bypass.');
     console.log(`[news-sitemap] Final status: BOT_PROTECTION at ${lastBotProtectionUrl}`);
   } else {
     result.notes.push(`No news sitemap found at any of ${NEWS_SITEMAP_PATHS.length} standard paths. For Google News publishers, add a /news-sitemap.xml with the news namespace.`);
