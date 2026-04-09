@@ -82,12 +82,31 @@ app.use('/api/news-seo', newsSeoRouter);
 app.use('/api/unified-audit', unifiedAuditRouter);
 
 // Phase 1: DB-backed audit routes (loaded from compiled backend)
+// Auto-compile if dist is missing so the server works out-of-the-box.
+import { existsSync as _existsSync } from 'node:fs';
+import { execSync as _execSync } from 'node:child_process';
+
+const backendDistEntry = join(__dirname, '..', 'backend', 'dist', 'routes', 'auditRunsSimple.js');
+if (!_existsSync(backendDistEntry)) {
+  console.log('backend/dist not found — compiling TypeScript now (this only runs once)…');
+  try {
+    _execSync('npm run build:backend', { cwd: join(__dirname, '..'), stdio: 'inherit' });
+    console.log('Backend compiled successfully.');
+  } catch (buildErr) {
+    console.error('Backend compilation failed:', buildErr.message);
+  }
+}
+
 try {
   const { auditRunsRouter } = await import('../backend/dist/routes/auditRunsSimple.js');
   app.use('/api', auditRunsRouter);
   console.log('Phase 1 audit routes loaded');
 } catch (err) {
-  console.warn('Phase 1 audit routes not available (run `npm run build:backend` first):', err.message);
+  console.error('Phase 1 audit routes FAILED to load:', err.message);
+  // Register a clear 503 for the affected endpoints so the UI shows a useful error.
+  app.post('/api/technical-analyzer/run', (_req, res) => {
+    res.status(503).json({ error: 'Audit service unavailable — backend compilation failed. Check server logs.' });
+  });
 }
 
 // Project management & audit history routes
@@ -96,7 +115,7 @@ try {
   app.use('/api', projectsRouter);
   console.log('Project management routes loaded');
 } catch (err) {
-  console.warn('Project management routes not available (run `npm run build:backend` first):', err.message);
+  console.warn('Project management routes not available:', err.message);
 }
 
 // Backward-compatible Supabase-style paths (if a reverse proxy sends these)
@@ -110,10 +129,9 @@ app.all('/api/*', (req, res) => {
 });
 
 // --------------- Static files (Vite build output) ---------------
-import { existsSync } from 'node:fs';
 const distPath = join(__dirname, '..', 'dist');
 
-if (existsSync(distPath)) {
+if (_existsSync(distPath)) {
   app.use(express.static(distPath));
 
   // SPA fallback - serve index.html for all non-API routes
