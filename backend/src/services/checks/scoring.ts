@@ -362,12 +362,18 @@ export function scoreResult(data: CheckData): ScoringResult {
     }
     if (!data.contentMeta.h1Ok) {
       escalate('FAIL');
+      const h1Count = data.contentMeta.h1Count ?? 0;
+      const h1Text  = data.contentMeta.h1 ?? null;
+      const h1Msg =
+        h1Count === 0
+          ? 'Critical: Missing H1 tag — every page must have exactly one H1'
+          : h1Text === null
+            ? 'Critical: H1 tag is empty — H1 must contain meaningful text'
+            : `Critical: Multiple H1 tags detected (${h1Count}) — use exactly one H1 per page`;
       recs.push({
         priority: 'P0', area: 'meta',
-        message: data.contentMeta.h1Count === 0
-          ? 'Missing H1 heading — every page must have exactly one H1'
-          : `Multiple H1 headings found (${data.contentMeta.h1Count}) — use exactly one H1 per page`,
-        fixHint: 'Each page must have exactly one <h1> tag. The H1 should match the main topic of the page and differ from the <title> tag.',
+        message: h1Msg,
+        fixHint: 'Each page must have exactly one <h1> tag with descriptive text. The H1 should match the main topic of the page and differ from the <title> tag.',
       });
     }
     if (data.contentMeta.duplicateTitle) {
