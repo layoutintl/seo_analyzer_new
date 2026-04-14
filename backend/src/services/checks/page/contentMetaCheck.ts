@@ -3,6 +3,7 @@
  */
 
 import type { PageType } from './canonicalCheck.js';
+import { getAttrValue, walkLinkTags } from './htmlAttr.js';
 
 export interface OgTags {
   title: string | null;
@@ -172,29 +173,42 @@ function extractLang(html: string): string | null {
 }
 
 function extractHreflangTags(html: string): HreflangEntry[] {
+  // Walk every <link> tag once.  Using walkLinkTags + getAttrValue handles:
+  //   - All 6 permutations of rel / hreflang / href attribute order
+  //   - Quoted (""), single-quoted (''), and unquoted attribute values
+  //   - Case-insensitive attribute names
+  // The previous implementation used 3 separate ordered regexes that covered
+  // only 3 of the 6 possible orderings and required quoted values throughout.
   const tags: HreflangEntry[] = [];
-  const re = /<link[^>]*rel=["']alternate["'][^>]*hreflang=["']([^"']+)["'][^>]*href=["']([^"']+)["'][^>]*>/gi;
-  const re2 = /<link[^>]*hreflang=["']([^"']+)["'][^>]*href=["']([^"']+)["'][^>]*rel=["']alternate["'][^>]*>/gi;
-  const re3 = /<link[^>]*href=["']([^"']+)["'][^>]*hreflang=["']([^"']+)["'][^>]*rel=["']alternate["'][^>]*>/gi;
-  let m: RegExpExecArray | null;
   const seen = new Set<string>();
-  for (const regex of [re, re2]) {
-    while ((m = regex.exec(html)) !== null) {
-      const key = `${m[1]}|${m[2]}`;
-      if (!seen.has(key)) { seen.add(key); tags.push({ hreflang: m[1], href: m[2] }); }
+
+  walkLinkTags(html, (attrs) => {
+    const rel = getAttrValue(attrs, 'rel');
+    if (rel?.toLowerCase() !== 'alternate') return;
+    const hreflang = getAttrValue(attrs, 'hreflang');
+    const href = getAttrValue(attrs, 'href');
+    if (!hreflang || !href) return;
+    const key = `${hreflang}|${href}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      tags.push({ hreflang, href });
     }
-  }
-  while ((m = re3.exec(html)) !== null) {
-    const key = `${m[2]}|${m[1]}`;
-    if (!seen.has(key)) { seen.add(key); tags.push({ hreflang: m[2], href: m[1] }); }
-  }
+  });
+
   return tags;
 }
 
 function extractAmpLink(html: string): string | null {
-  const m = html.match(/<link[^>]*rel=["']amphtml["'][^>]*href=["']([^"']+)["']/i) ??
-            html.match(/<link[^>]*href=["']([^"']+)["'][^>]*rel=["']amphtml["']/i);
-  return m ? m[1] : null;
+  // Walk <link> tags with the shared helper so unquoted rel=amphtml is handled.
+  let found: string | null = null;
+  walkLinkTags(html, (attrs) => {
+    const rel = getAttrValue(attrs, 'rel');
+    if (rel?.toLowerCase() === 'amphtml') {
+      found = getAttrValue(attrs, 'href');
+      return false; // stop after first match
+    }
+  });
+  return found;
 }
 
 function countLinks(html: string, pageUrl: string): { internal: number; external: number } {

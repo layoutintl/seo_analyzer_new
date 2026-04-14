@@ -2,6 +2,8 @@
  * Canonical tag check for a single page.
  */
 
+import { getAttrValue, walkLinkTags } from './htmlAttr.js';
+
 export type PageType = 'home' | 'section' | 'article' | 'search' | 'tag' | 'author' | 'video_article' | 'unknown';
 
 export interface CanonicalResult {
@@ -187,26 +189,6 @@ export function detectPageTypeWithHtml(url: string, html: string): PageType {
 }
 
 /**
- * Return the value of a named attribute from a tag's attribute string.
- * Handles:
- *   - Double-quoted values:  name="value"
- *   - Single-quoted values:  name='value'
- *   - Unquoted values:       name=value  (valid HTML5 for values without spaces)
- *   - Case-insensitive attribute name matching
- */
-function getAttrValue(attrs: string, attrName: string): string | null {
-  const escaped = attrName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const re = new RegExp(
-    `\\b${escaped}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>"']+))`,
-    'i',
-  );
-  const m = attrs.match(re);
-  if (!m) return null;
-  const val = (m[1] ?? m[2] ?? m[3] ?? '').trim();
-  return val || null;
-}
-
-/**
  * Extract the canonical URL from raw HTML.
  *
  * Correctly handles all of these real-world variations:
@@ -219,22 +201,15 @@ function getAttrValue(attrs: string, attrName: string): string | null {
  * Returns null when no canonical <link> tag is present in the HTML.
  */
 export function extractCanonical(html: string): string | null {
-  // Match every <link …> or <link …/> tag, case-insensitively.
-  // [^>]*? is lazy — it stops at the first '>' that closes the tag.
-  // URLs should never contain a bare '>' (they encode it as &gt;), so this is safe.
-  const linkTagRe = /<link\b([^>]*?)(?:\/?>)/gi;
-  let tagMatch: RegExpExecArray | null;
-
-  while ((tagMatch = linkTagRe.exec(html)) !== null) {
-    const attrs = tagMatch[1];
+  let found: string | null = null;
+  walkLinkTags(html, (attrs) => {
     const rel = getAttrValue(attrs, 'rel');
     if (rel?.toLowerCase() === 'canonical') {
-      const href = getAttrValue(attrs, 'href');
-      if (href) return href;
+      found = getAttrValue(attrs, 'href');
+      return false; // stop after first canonical
     }
-  }
-
-  return null;
+  });
+  return found;
 }
 
 export function runCanonicalCheck(

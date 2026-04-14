@@ -3,6 +3,7 @@
  */
 
 import type { PageType } from './canonicalCheck.js';
+import { getAttrValue, walkLinkTags } from './htmlAttr.js';
 
 export interface PaginationResult {
   detectedPagination: boolean;
@@ -18,8 +19,16 @@ const PAGE_PARAM_PATTERNS = [
 ];
 
 function hasRelLink(html: string, rel: 'next' | 'prev'): boolean {
-  const re = new RegExp(`<link[^>]*rel=["']${rel}["'][^>]*/?>`, 'i');
-  return re.test(html);
+  // Use walkLinkTags + getAttrValue so that unquoted rel=next / rel=prev
+  // (valid HTML5) is detected, and attribute order doesn't matter.
+  let found = false;
+  walkLinkTags(html, (attrs) => {
+    if (getAttrValue(attrs, 'rel')?.toLowerCase() === rel) {
+      found = true;
+      return false; // stop early
+    }
+  });
+  return found;
 }
 
 function stripPageParam(url: string): string {
