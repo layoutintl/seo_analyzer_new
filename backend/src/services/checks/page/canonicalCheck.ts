@@ -2,6 +2,8 @@
  * Canonical tag check for a single page.
  */
 
+import { getAttrValue, walkLinkTags } from './htmlAttr.js';
+
 export type PageType = 'home' | 'section' | 'article' | 'search' | 'tag' | 'author' | 'video_article' | 'unknown';
 
 export interface CanonicalResult {
@@ -143,7 +145,10 @@ export function detectPageTypeWithHtml(url: string, html: string): PageType {
   const hasVideoSchema = schemaTypes.has('VideoObject');
   const hasPersonSchema = schemaTypes.has('Person') || schemaTypes.has('ProfilePage');
 
-  // Check OG type
+  // Check OG type — used only as a page-classification heuristic here, not
+  // as user-facing extraction.  These two ordered regexes predate the shared
+  // htmlAttr.ts helpers; a future pass could migrate them to walkMetaTags but
+  // the impact is limited to classification accuracy, not audit output.
   const ogTypeMatch = html.match(/<meta[^>]*property=["']og:type["'][^>]*content=["']([^"']+)["']/i)
     ?? html.match(/<meta[^>]*content=["']([^"']+)["'][^>]*property=["']og:type["']/i);
   const ogType = ogTypeMatch?.[1]?.toLowerCase() ?? '';
@@ -151,7 +156,7 @@ export function detectPageTypeWithHtml(url: string, html: string): PageType {
   // Check for <article> semantic element
   const hasArticleElement = /<article[\s>]/i.test(html);
 
-  // Check for article:published_time OG tag (strong article signal)
+  // Presence-only signal — no value extraction needed, so a simple regex is fine.
   const hasPublishedTime = /<meta[^>]*property=["']article:published_time["']/i.test(html);
 
   // If URL said 'author' and schema confirms Person, keep it
@@ -186,6 +191,30 @@ export function detectPageTypeWithHtml(url: string, html: string): PageType {
   return urlType;
 }
 
+/**
+ * Extract the canonical URL from raw HTML.
+ *
+ * Correctly handles all of these real-world variations:
+ *   <link rel="canonical" href="https://example.com/">         — standard
+ *   <link href="https://example.com/" rel="canonical">         — reversed attr order
+ *   <link href="https://example.com/" rel=canonical>           — unquoted rel (HTML5)
+ *   <LINK REL="CANONICAL" HREF="https://example.com/">         — uppercase
+ *   <link rel='canonical' href='https://example.com/'  />      — single quotes + extra space
+ *
+ * Returns null when no canonical <link> tag is present in the HTML.
+ */
+export function extractCanonical(html: string): string | null {
+  let found: string | null = null;
+  walkLinkTags(html, (attrs) => {
+    const rel = getAttrValue(attrs, 'rel');
+    if (rel?.toLowerCase() === 'canonical') {
+      found = getAttrValue(attrs, 'href');
+      return false; // stop after first canonical
+    }
+  });
+  return found;
+}
+
 export function runCanonicalCheck(
   html: string,
   finalUrl: string,
@@ -200,25 +229,25 @@ export function runCanonicalCheck(
     notes: [],
   };
 
-  // Extract canonical
-  const m =
-    html.match(/<link[^>]*rel=["']canonical["'][^>]*href=["']([^"']+)["']/i) ??
-    html.match(/<link[^>]*href=["']([^"']+)["'][^>]*rel=["']canonical["']/i);
+  // Extract canonical — handles any attribute order, quoted or unquoted values,
+  // and case-insensitive tag/attribute names.
+  const canonicalUrl = extractCanonical(html);
 
-  if (!m) {
+  if (!canonicalUrl) {
     result.notes.push('No rel=canonical found');
+    console.log(`[canonical] No canonical tag found | Page URL: "${finalUrl}"`);
     return result;
   }
 
   result.exists = true;
-  result.canonicalUrl = m[1];
-  console.log(`[canonical] Extracted: "${m[1]}" | Page URL: "${finalUrl}"`);
+  result.canonicalUrl = canonicalUrl;
+  console.log(`[canonical] Extracted: "${canonicalUrl}" | Page URL: "${finalUrl}"`);
 
   // Normalize and compare — three tiers of matching:
   // 1. Strict: exact match after basic normalization
   // 2. Lenient: match after stripping tracking params and fragments
   // 3. Path-only: same origin + pathname (ignoring all query params)
-  const normCanonical = normalizeUrl(m[1]);
+  const normCanonical = normalizeUrl(canonicalUrl);
   const normFinal = normalizeUrl(finalUrl);
 
   if (normCanonical === normFinal) {
@@ -226,7 +255,7 @@ export function runCanonicalCheck(
     result.match = true;
   } else {
     // Tier 2: Lenient match (strip tracking params, sort remaining)
-    const lenientCanonical = normalizeUrlLenient(m[1]);
+    const lenientCanonical = normalizeUrlLenient(canonicalUrl);
     const lenientFinal = normalizeUrlLenient(finalUrl);
     if (lenientCanonical === lenientFinal) {
       result.match = true;
@@ -234,7 +263,7 @@ export function runCanonicalCheck(
     } else {
       // Tier 3: Check if only query params differ (canonical is clean, page URL has params)
       try {
-        const canonParsed = new URL(m[1]);
+        const canonParsed = new URL(canonicalUrl);
         const finalParsed = new URL(finalUrl);
         const canonPath = canonParsed.origin.toLowerCase() + decodeURI(canonParsed.pathname).replace(/\/+$/, '');
         const finalPath = finalParsed.origin.toLowerCase() + decodeURI(finalParsed.pathname).replace(/\/+$/, '');
@@ -246,10 +275,10 @@ export function runCanonicalCheck(
           result.match = true;
           result.notes.push('Match on path — query parameter differences only');
         } else {
-          result.notes.push(`Canonical (${m[1]}) does not match final URL (${finalUrl})`);
+          result.notes.push(`Canonical (${canonicalUrl}) does not match final URL (${finalUrl})`);
         }
       } catch {
-        result.notes.push(`Canonical (${m[1]}) does not match final URL (${finalUrl})`);
+        result.notes.push(`Canonical (${canonicalUrl}) does not match final URL (${finalUrl})`);
       }
     }
   }
@@ -257,7 +286,7 @@ export function runCanonicalCheck(
   // Query string policy — only warn if canonical itself contains tracking/unnecessary params
   const allowQuery = opts.allowQueryCanonical ?? false;
   try {
-    const cu = new URL(m[1]);
+    const cu = new URL(canonicalUrl);
     if (cu.search && !allowQuery) {
       // Check if the canonical's query params are all tracking params (acceptable) or substantive
       const hasNonTrackingParams = Array.from(cu.searchParams.keys()).some(k => !TRACKING_PARAMS.has(k));

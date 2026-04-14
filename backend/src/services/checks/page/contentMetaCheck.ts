@@ -3,6 +3,7 @@
  */
 
 import type { PageType } from './canonicalCheck.js';
+import { getAttrValue, walkLinkTags, walkMetaTags } from './htmlAttr.js';
 
 export interface OgTags {
   title: string | null;
@@ -61,13 +62,18 @@ function extractTitle(html: string): string | null {
 }
 
 function extractDescription(html: string): string | null {
-  // Try double-quote delimited first, then single-quote, matching the same quote style
-  const m =
-    html.match(/<meta[^>]*name=["']description["'][^>]*content="([^"]*)"/i) ??
-    html.match(/<meta[^>]*name=["']description["'][^>]*content='([^']*)'/i) ??
-    html.match(/<meta[^>]*content="([^"]*)"[^>]*name=["']description["']/i) ??
-    html.match(/<meta[^>]*content='([^']*)'[^>]*name=["']description["']/i);
-  return m ? m[1] : null;
+  // Walk every <meta> tag and look for name="description" (or name='description'
+  // or unquoted name=description) regardless of attribute order.
+  // The previous four-regex approach required quotes on `name` and covered only
+  // two attribute orderings per quote style.
+  let found: string | null = null;
+  walkMetaTags(html, (attrs) => {
+    if (getAttrValue(attrs, 'name')?.toLowerCase() === 'description') {
+      found = getAttrValue(attrs, 'content');
+      return false; // stop after first match
+    }
+  });
+  return found;
 }
 
 function extractH1s(html: string): string[] {
@@ -81,10 +87,16 @@ function extractH1s(html: string): string[] {
 }
 
 function extractRobotsMeta(html: string): { noindex: boolean; nofollow: boolean } {
-  const m =
-    html.match(/<meta[^>]*name=["']robots["'][^>]*content=["']([^"']*)["']/i) ??
-    html.match(/<meta[^>]*content=["']([^"']*)["'][^>]*name=["']robots["']/i);
-  const content = m ? m[1].toLowerCase() : '';
+  // Walk <meta> tags so unquoted name=robots and any attribute order are handled.
+  // The content string is lowercased for directive detection; the directives
+  // themselves (noindex, nofollow) are case-insensitive per the spec.
+  let content = '';
+  walkMetaTags(html, (attrs) => {
+    if (getAttrValue(attrs, 'name')?.toLowerCase() === 'robots') {
+      content = (getAttrValue(attrs, 'content') ?? '').toLowerCase();
+      return false;
+    }
+  });
   return {
     noindex: content.includes('noindex'),
     nofollow: content.includes('nofollow'),
@@ -92,34 +104,56 @@ function extractRobotsMeta(html: string): { noindex: boolean; nofollow: boolean 
 }
 
 function extractOgTags(html: string): OgTags {
-  const get = (prop: string): string | null => {
-    const m =
-      html.match(new RegExp(`<meta[^>]*property=["']og:${prop}["'][^>]*content=["']([^"']*)["']`, 'i')) ??
-      html.match(new RegExp(`<meta[^>]*content=["']([^"']*)["'][^>]*property=["']og:${prop}["']`, 'i'));
-    return m ? m[1] : null;
-  };
-  // Also extract article:published_time and article:modified_time
-  const getArticle = (prop: string): string | null => {
-    const m =
-      html.match(new RegExp(`<meta[^>]*property=["']article:${prop}["'][^>]*content=["']([^"']*)["']`, 'i')) ??
-      html.match(new RegExp(`<meta[^>]*content=["']([^"']*)["'][^>]*property=["']article:${prop}["']`, 'i'));
-    return m ? m[1] : null;
-  };
+  // Single pass over all <meta> tags.
+  // Replaces 14 separate regex calls (7 properties × 2 orderings) with one
+  // walkMetaTags pass that handles any attribute order and all quoting styles.
+  // The `property` value is lowercased for matching; `content` is kept as-is.
+  const og: Partial<Record<keyof OgTags, string>> = {};
+
+  walkMetaTags(html, (attrs) => {
+    const property = getAttrValue(attrs, 'property')?.toLowerCase();
+    if (!property) return;
+    const content = getAttrValue(attrs, 'content');
+    if (content === null) return;
+    switch (property) {
+      case 'og:title':                og.title = content; break;
+      case 'og:description':          og.description = content; break;
+      case 'og:image':                og.image = content; break;
+      case 'og:type':                 og.type = content; break;
+      case 'og:url':                  og.url = content; break;
+      case 'article:published_time':  og.articlePublishedTime = content; break;
+      case 'article:modified_time':   og.articleModifiedTime = content; break;
+    }
+  });
+
   return {
-    title: get('title'), description: get('description'), image: get('image'), type: get('type'), url: get('url'),
-    articlePublishedTime: getArticle('published_time'),
-    articleModifiedTime: getArticle('modified_time'),
+    title:                og.title               ?? null,
+    description:          og.description         ?? null,
+    image:                og.image               ?? null,
+    type:                 og.type                ?? null,
+    url:                  og.url                 ?? null,
+    articlePublishedTime: og.articlePublishedTime ?? null,
+    articleModifiedTime:  og.articleModifiedTime  ?? null,
   };
 }
 
 function extractTwitterTags(html: string): TwitterTags {
-  const get = (prop: string): string | null => {
-    const m =
-      html.match(new RegExp(`<meta[^>]*name=["']twitter:${prop}["'][^>]*content=["']([^"']*)["']`, 'i')) ??
-      html.match(new RegExp(`<meta[^>]*content=["']([^"']*)["'][^>]*name=["']twitter:${prop}["']`, 'i'));
-    return m ? m[1] : null;
-  };
-  return { card: get('card'), title: get('title'), image: get('image') };
+  // Single pass — replaces 6 regex calls (3 props × 2 orderings).
+  const tw: Partial<TwitterTags> = {};
+
+  walkMetaTags(html, (attrs) => {
+    const name = getAttrValue(attrs, 'name')?.toLowerCase();
+    if (!name?.startsWith('twitter:')) return;
+    const content = getAttrValue(attrs, 'content');
+    if (content === null) return;
+    switch (name) {
+      case 'twitter:card':  tw.card  = content; break;
+      case 'twitter:title': tw.title = content; break;
+      case 'twitter:image': tw.image = content; break;
+    }
+  });
+
+  return { card: tw.card ?? null, title: tw.title ?? null, image: tw.image ?? null };
 }
 
 function countWords(html: string): number {
@@ -156,10 +190,23 @@ function hasMainImage(html: string): boolean {
 }
 
 function hasViewport(html: string): boolean {
-  return /<meta[^>]*name=["']viewport["']/i.test(html);
+  let found = false;
+  walkMetaTags(html, (attrs) => {
+    if (getAttrValue(attrs, 'name')?.toLowerCase() === 'viewport') {
+      found = true;
+      return false;
+    }
+  });
+  return found;
 }
 
 function extractCharset(html: string): string | null {
+  // HTML5 form: <meta charset="UTF-8"> or <meta charset=UTF-8>
+  // The ["']? already makes the quote optional, so unquoted charset= is handled.
+  // NOT migrated to walkMetaTags because the fallback (http-equiv) requires
+  // parsing a charset= token *inside* a content attribute value
+  // (e.g. content="text/html; charset=UTF-8") — a nested extraction problem
+  // that walkMetaTags + getAttrValue does not solve.
   const m = html.match(/<meta[^>]*charset=["']?([^"'\s>]+)/i);
   if (m) return m[1];
   const m2 = html.match(/<meta[^>]*http-equiv=["']content-type["'][^>]*content=["'][^"']*charset=([^"'\s;]+)/i);
@@ -167,34 +214,52 @@ function extractCharset(html: string): string | null {
 }
 
 function extractLang(html: string): string | null {
-  const m = html.match(/<html[^>]*\slang=["']([^"']+)["']/i);
-  return m ? m[1] : null;
+  // Match the opening <html> tag's attribute string, then extract `lang`
+  // via getAttrValue so unquoted lang=en and any attribute order are handled.
+  // Greedy [^>]* is safe here: the <html> opening tag in real HTML never
+  // contains a bare ">" inside an attribute value.
+  const m = html.match(/<html\b([^>]*)>/i);
+  if (!m) return null;
+  return getAttrValue(m[1], 'lang');
 }
 
 function extractHreflangTags(html: string): HreflangEntry[] {
+  // Walk every <link> tag once.  Using walkLinkTags + getAttrValue handles:
+  //   - All 6 permutations of rel / hreflang / href attribute order
+  //   - Quoted (""), single-quoted (''), and unquoted attribute values
+  //   - Case-insensitive attribute names
+  // The previous implementation used 3 separate ordered regexes that covered
+  // only 3 of the 6 possible orderings and required quoted values throughout.
   const tags: HreflangEntry[] = [];
-  const re = /<link[^>]*rel=["']alternate["'][^>]*hreflang=["']([^"']+)["'][^>]*href=["']([^"']+)["'][^>]*>/gi;
-  const re2 = /<link[^>]*hreflang=["']([^"']+)["'][^>]*href=["']([^"']+)["'][^>]*rel=["']alternate["'][^>]*>/gi;
-  const re3 = /<link[^>]*href=["']([^"']+)["'][^>]*hreflang=["']([^"']+)["'][^>]*rel=["']alternate["'][^>]*>/gi;
-  let m: RegExpExecArray | null;
   const seen = new Set<string>();
-  for (const regex of [re, re2]) {
-    while ((m = regex.exec(html)) !== null) {
-      const key = `${m[1]}|${m[2]}`;
-      if (!seen.has(key)) { seen.add(key); tags.push({ hreflang: m[1], href: m[2] }); }
+
+  walkLinkTags(html, (attrs) => {
+    const rel = getAttrValue(attrs, 'rel');
+    if (rel?.toLowerCase() !== 'alternate') return;
+    const hreflang = getAttrValue(attrs, 'hreflang');
+    const href = getAttrValue(attrs, 'href');
+    if (!hreflang || !href) return;
+    const key = `${hreflang}|${href}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      tags.push({ hreflang, href });
     }
-  }
-  while ((m = re3.exec(html)) !== null) {
-    const key = `${m[2]}|${m[1]}`;
-    if (!seen.has(key)) { seen.add(key); tags.push({ hreflang: m[2], href: m[1] }); }
-  }
+  });
+
   return tags;
 }
 
 function extractAmpLink(html: string): string | null {
-  const m = html.match(/<link[^>]*rel=["']amphtml["'][^>]*href=["']([^"']+)["']/i) ??
-            html.match(/<link[^>]*href=["']([^"']+)["'][^>]*rel=["']amphtml["']/i);
-  return m ? m[1] : null;
+  // Walk <link> tags with the shared helper so unquoted rel=amphtml is handled.
+  let found: string | null = null;
+  walkLinkTags(html, (attrs) => {
+    const rel = getAttrValue(attrs, 'rel');
+    if (rel?.toLowerCase() === 'amphtml') {
+      found = getAttrValue(attrs, 'href');
+      return false; // stop after first match
+    }
+  });
+  return found;
 }
 
 function countLinks(html: string, pageUrl: string): { internal: number; external: number } {
