@@ -50,6 +50,7 @@ projectsRouter.get('/projects', async (_req: Request, res: Response) => {
         s.website_url,
         s.created_at,
         s.last_audit_at,
+        s.last_form_values,
         COUNT(ar.id)::int                                             AS audit_count,
         COUNT(ar.id) FILTER (WHERE ar.status = 'COMPLETED')::int     AS completed_count
       FROM sites s
@@ -370,7 +371,7 @@ projectsRouter.patch('/projects/:id/form-values', async (req: Request, res: Resp
   const db = requireDb(res);
   if (!db) return;
 
-  const allowed = ['homeUrl', 'articleUrl', 'sectionUrl', 'tagUrl', 'searchUrl', 'authorUrl', 'videoArticleUrl'];
+  const allowed = ['homeUrl', 'articleUrl', 'sectionUrl', 'tagUrl', 'searchUrl', 'authorUrl', 'videoArticleUrl', 'xmlSitemapUrl', 'newsSitemapUrl'];
   const body = req.body ?? {};
 
   // Accept only known keys; discard everything else

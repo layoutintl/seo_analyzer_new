@@ -24,6 +24,8 @@ export interface ProjectFormValues {
   searchUrl?: string;
   authorUrl?: string;
   videoArticleUrl?: string;
+  xmlSitemapUrl?: string;
+  newsSitemapUrl?: string;
 }
 
 export interface Project {
