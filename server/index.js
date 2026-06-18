@@ -176,6 +176,15 @@ try {
   console.warn('News Sitemap audit route not available:', err.message);
 }
 
+// Robots.txt audit route (isolated, additive — stateless, no DB required)
+try {
+  const { robotsTxtAuditRouter } = await import('../backend/dist/routes/robotsTxtAudit.js');
+  app.use('/api', robotsTxtAuditRouter);
+  console.log('Robots.txt audit route loaded');
+} catch (err) {
+  console.warn('Robots.txt audit route not available:', err.message);
+}
+
 // Backward-compatible Supabase-style paths (if a reverse proxy sends these)
 app.use('/functions/v1/seo-intelligence', seoIntelligenceRouter);
 app.use('/functions/v1/seo-site-crawler', seoCrawlerRouter);
