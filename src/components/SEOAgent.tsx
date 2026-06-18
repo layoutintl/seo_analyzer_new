@@ -1855,6 +1855,19 @@ const OPTIONAL_TYPES = [
   { key: 'video_article', label: 'Video Article URL', placeholder: 'https://example.com/video/...' },
 ] as const;
 
+// Bridge between the form's short optional-field keys (used by the audit-run
+// request) and the canonical suffixed keys used for per-project persistence
+// (last_form_values / the projects PATCH allow-list). Persistence and the run
+// request use different vocabularies, so we map only at the save/load boundary —
+// the run request itself is left untouched.
+const OPTIONAL_KEY_TO_FORM: Record<string, keyof SEOAgentFormValues> = {
+  section: 'sectionUrl',
+  tag: 'tagUrl',
+  search: 'searchUrl',
+  author: 'authorUrl',
+  video_article: 'videoArticleUrl',
+};
+
 const POLL_INTERVAL = 2000;
 const POLL_MAX = 60_000;
 const POLL_MAX_ERRORS = 5;
@@ -1973,11 +1986,14 @@ export default function SEOAgent({
   const [articleUrl, setArticleUrl] = useState(initialFormValues?.articleUrl ?? '');
   const [optionals, setOptionals] = useState<Record<string, string>>(() => {
     if (!initialFormValues) return {};
-    // Exclude the primary + dedicated sitemap/crawl fields; the rest are optional page URLs.
-    const { homeUrl: _h, articleUrl: _a, xmlSitemapUrl: _x, newsSitemapUrl: _n, robotsTxtUrl: _r, ...rest } = initialFormValues;
-    return Object.fromEntries(
-      Object.entries(rest).filter(([, v]) => typeof v === 'string' && v.trim())
-    ) as Record<string, string>;
+    // Map saved suffixed keys (sectionUrl, …) back to the form's short keys
+    // (section, …) so the optional fields restore correctly when a project loads.
+    const init: Record<string, string> = {};
+    for (const [shortKey, formKey] of Object.entries(OPTIONAL_KEY_TO_FORM)) {
+      const v = initialFormValues[formKey];
+      if (typeof v === 'string' && v.trim()) init[shortKey] = v;
+    }
+    return init;
   });
   // Sitemap URLs — dedicated state so they persist with their canonical keys
   // (independent of the optional page-URL bag). News Sitemap is analyzed; the
@@ -2122,6 +2138,23 @@ export default function SEOAgent({
     }
   }, []);
 
+  // ── Start New Audit ───────────────────────────────────────────────
+  // Resets only the current UI session state so the user can run another
+  // audit without refreshing or reswitching projects. URL fields, the saved
+  // project configuration, and audit history are intentionally preserved.
+  const startNewAudit = useCallback(() => {
+    stopPolling();
+    setRunData(null);
+    setError('');
+    setProgress('');
+    setLoading(false);
+    setNewsSitemapResult(null);
+    setNewsSitemapLoading(false);
+    setRobotsTxtResult(null);
+    setRobotsTxtLoading(false);
+    if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [stopPolling]);
+
   const runAudit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!homeUrl.trim() || !articleUrl.trim()) { setError('Home URL and Article URL are required.'); return; }
@@ -2215,7 +2248,15 @@ export default function SEOAgent({
       const { siteId, auditRunId } = json as { siteId: string; auditRunId: string };
       // Notify project layer of the site id so it can save form values
       if (siteId && onAuditStarted) {
-        const vals: SEOAgentFormValues = { homeUrl: homeUrl.trim(), articleUrl: articleUrl.trim(), ...optionals };
+        // Persist all audit URL fields under their canonical suffixed keys.
+        // Only non-empty values are sent; the backend replaces the whole
+        // last_form_values object, so cleared fields are dropped (and stay
+        // cleared on reload) rather than being silently retained.
+        const vals: SEOAgentFormValues = { homeUrl: homeUrl.trim(), articleUrl: articleUrl.trim() };
+        for (const [shortKey, formKey] of Object.entries(OPTIONAL_KEY_TO_FORM)) {
+          const v = optionals[shortKey]?.trim();
+          if (v) vals[formKey] = v;
+        }
         if (xmlSitemapUrl.trim()) vals.xmlSitemapUrl = xmlSitemapUrl.trim();
         if (newsSitemapUrl.trim()) vals.newsSitemapUrl = newsSitemapUrl.trim();
         if (robotsTxtUrl.trim()) vals.robotsTxtUrl = robotsTxtUrl.trim();
@@ -2506,6 +2547,18 @@ export default function SEOAgent({
         {/* Results */}
         {runData && (
           <div className="space-y-6">
+            {/* Start New Audit — resets the result UI without losing URLs/project */}
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <p className="text-sm text-slate-500">Audit complete. Start a new audit without losing your saved URLs.</p>
+              <button
+                type="button"
+                onClick={startNewAudit}
+                className="inline-flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors shadow-sm"
+              >
+                <Plus className="w-4 h-4" /> Start New Audit
+              </button>
+            </div>
+
             {/* Enhanced Summary Dashboard */}
             <div className="bg-white rounded-2xl shadow-lg overflow-hidden">
               <div className="p-6">
