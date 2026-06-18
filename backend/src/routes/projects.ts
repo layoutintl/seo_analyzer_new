@@ -371,7 +371,7 @@ projectsRouter.patch('/projects/:id/form-values', async (req: Request, res: Resp
   const db = requireDb(res);
   if (!db) return;
 
-  const allowed = ['homeUrl', 'articleUrl', 'sectionUrl', 'tagUrl', 'searchUrl', 'authorUrl', 'videoArticleUrl', 'xmlSitemapUrl', 'newsSitemapUrl'];
+  const allowed = ['homeUrl', 'articleUrl', 'sectionUrl', 'tagUrl', 'searchUrl', 'authorUrl', 'videoArticleUrl', 'xmlSitemapUrl', 'newsSitemapUrl', 'robotsTxtUrl'];
   const body = req.body ?? {};
 
   // Accept only known keys; discard everything else

@@ -26,6 +26,7 @@ export interface ProjectFormValues {
   videoArticleUrl?: string;
   xmlSitemapUrl?: string;
   newsSitemapUrl?: string;
+  robotsTxtUrl?: string;
 }
 
 export interface Project {

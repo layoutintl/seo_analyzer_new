@@ -1665,6 +1665,186 @@ function NewsSitemapAuditPanel({
   );
 }
 
+/* ── Robots.txt Audit panel ────────────────────────────────────── */
+
+function RobotsTxtAuditPanel({
+  loading,
+  result,
+}: {
+  loading: boolean;
+  result: RobotsTxtAuditResult | null;
+}) {
+  const [showAllIssues, setShowAllIssues] = useState(false);
+
+  if (loading && !result) {
+    return (
+      <div className="bg-white rounded-2xl shadow-lg overflow-hidden px-6 py-5">
+        <div className="flex items-center gap-3">
+          <Shield className="w-5 h-5 text-slate-400" />
+          <h3 className="text-base font-bold text-slate-900">Robots.txt Audit</h3>
+          <Loader2 className="w-4 h-4 animate-spin text-blue-500" />
+          <span className="text-sm text-slate-500">Fetching &amp; analyzing robots.txt…</span>
+        </div>
+      </div>
+    );
+  }
+  if (!result) return null;
+
+  const statusStyles: Record<RobotsTxtAuditResult['status'], string> = {
+    'Excellent':         'bg-green-100 text-green-700',
+    'Good':              'bg-emerald-100 text-emerald-700',
+    'Needs Improvement': 'bg-amber-100 text-amber-700',
+    'Critical Issues':   'bg-red-100 text-red-700',
+  };
+  const scoreColor =
+    result.score >= 90 ? 'text-green-600' :
+    result.score >= 75 ? 'text-emerald-600' :
+    result.score >= 50 ? 'text-amber-600' : 'text-red-600';
+
+  const crawlBadge = (s: CrawlStatus) =>
+    s === 'Allowed' ? 'bg-green-100 text-green-700'
+    : s === 'Partially Blocked' ? 'bg-amber-100 text-amber-700'
+    : s === 'Blocked' ? 'bg-red-100 text-red-700'
+    : 'bg-slate-100 text-slate-500';
+
+  const sev = (s: RobotsTxtIssue['severity']) =>
+    s === 'critical' ? 'bg-red-50 border-red-200 text-red-700'
+    : s === 'warning' ? 'bg-amber-50 border-amber-200 text-amber-700'
+    : 'bg-slate-50 border-slate-200 text-slate-600';
+
+  // top_critical first, then by severity.
+  const order = { critical: 0, warning: 1, info: 2 };
+  const sortedIssues = [...result.issues].sort((a, b) => {
+    if ((a.priority === 'top_critical') !== (b.priority === 'top_critical')) {
+      return a.priority === 'top_critical' ? -1 : 1;
+    }
+    return order[a.severity] - order[b.severity];
+  });
+  const visibleIssues = showAllIssues ? sortedIssues : sortedIssues.slice(0, 12);
+
+  const yesNo = (v: boolean) => (v ? 'Yes' : 'No');
+
+  return (
+    <div className="bg-white rounded-2xl shadow-lg overflow-hidden">
+      {/* Header */}
+      <div className="p-6 flex flex-col sm:flex-row items-center gap-5">
+        <div className="flex flex-col items-center justify-center w-24 h-24 rounded-2xl bg-slate-50 border border-slate-100 shrink-0">
+          <span className={`text-3xl font-bold ${scoreColor}`}>{result.score}</span>
+          <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">/ 100</span>
+        </div>
+        <div className="flex-1 text-center sm:text-left min-w-0">
+          <div className="flex items-center gap-2 justify-center sm:justify-start flex-wrap">
+            <Shield className="w-5 h-5 text-slate-500" />
+            <h3 className="text-lg font-bold text-slate-900">Robots.txt Audit</h3>
+            <span className={`text-xs font-semibold px-2.5 py-0.5 rounded-full ${statusStyles[result.status]}`}>{result.status}</span>
+            <span className="text-[11px] text-slate-400">HTTP {result.httpStatus || '—'}</span>
+          </div>
+          <p className="text-xs text-slate-500 mt-1 font-mono truncate" title={result.url}>{result.url}</p>
+          {result.autoDetected && (
+            <p className="text-[11px] text-slate-400 mt-1">Auto-detected from the Home URL.</p>
+          )}
+          <div className="flex items-center gap-2 mt-2 justify-center sm:justify-start flex-wrap">
+            <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${crawlBadge(result.summary.googlebotStatus)}`}>
+              Googlebot: {result.summary.googlebotStatus}
+            </span>
+            <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${crawlBadge(result.summary.googlebotNewsStatus)}`}>
+              Googlebot-News: {result.summary.googlebotNewsStatus}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* Stat grid */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-px bg-slate-100 border-y border-slate-100">
+        {[
+          { label: 'User-agent groups', value: String(result.summary.userAgentGroups) },
+          { label: 'Sitemap directives', value: String(result.summary.sitemapDirectives) },
+          { label: 'XML Sitemap declared', value: yesNo(result.summary.xmlSitemapDeclared), tone: result.summary.xmlSitemapDeclared ? 'text-green-600' : 'text-amber-600' },
+          { label: 'News Sitemap declared', value: yesNo(result.summary.newsSitemapDeclared), tone: result.summary.newsSitemapDeclared ? 'text-green-600' : 'text-amber-600' },
+          { label: 'Invalid directives', value: String(result.summary.invalidDirectives), tone: result.summary.invalidDirectives ? 'text-red-600' : undefined },
+          { label: 'Critical', value: String(result.summary.criticalIssues), tone: result.summary.criticalIssues ? 'text-red-700' : undefined },
+          { label: 'Warnings', value: String(result.summary.warnings), tone: result.summary.warnings ? 'text-amber-600' : undefined },
+          { label: 'Sitemaps found', value: String(result.sitemaps.length) },
+        ].map(s => (
+          <div key={s.label} className="bg-white px-3 py-2.5 text-center">
+            <p className={`text-lg font-bold ${s.tone ?? 'text-slate-700'}`}>{s.value}</p>
+            <p className="text-[10px] font-medium text-slate-400 uppercase tracking-wide">{s.label}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* Declared sitemaps */}
+      {result.sitemaps.length > 0 && (
+        <div className="px-6 py-3 border-b border-slate-100">
+          <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Declared sitemaps</h4>
+          <ul className="space-y-0.5">
+            {result.sitemaps.map((s, i) => (
+              <li key={i} className="text-xs font-mono text-slate-600 truncate" title={s}>{s}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Recommendations */}
+      {result.recommendations.length > 0 && (
+        <div className="px-6 py-4 border-b border-slate-100">
+          <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Recommendations</h4>
+          <ul className="space-y-1">
+            {result.recommendations.map((r, i) => (
+              <li key={i} className="flex items-start gap-2 text-sm text-slate-600">
+                <CheckCircle className="w-4 h-4 text-blue-500 mt-0.5 shrink-0" />
+                <span>{r}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Issues */}
+      {sortedIssues.length > 0 ? (
+        <div className="px-6 py-4">
+          <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">
+            Issues ({sortedIssues.length})
+          </h4>
+          <div className="space-y-2">
+            {visibleIssues.map((iss, i) => (
+              <div key={i} className={`border rounded-lg px-3 py-2 ${sev(iss.severity)}`}>
+                <div className="flex items-start gap-2">
+                  {iss.severity === 'critical' ? <XCircle className="w-4 h-4 mt-0.5 shrink-0" />
+                    : iss.severity === 'warning' ? <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+                    : <Info className="w-4 h-4 mt-0.5 shrink-0" />}
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      {iss.priority === 'top_critical' && (
+                        <span className="text-[9px] font-bold uppercase tracking-wider bg-red-600 text-white px-1.5 py-0.5 rounded">Top Critical</span>
+                      )}
+                      <p className="text-sm font-medium">{iss.message}</p>
+                    </div>
+                    {iss.matchedRule && <p className="text-[11px] font-mono opacity-70 mt-0.5">{iss.userAgent ? `User-agent: ${iss.userAgent} · ` : ''}{iss.matchedRule}</p>}
+                    {iss.url && <p className="text-[11px] font-mono opacity-70 truncate" title={iss.url}>{iss.url}</p>}
+                    <p className="text-[11px] opacity-80 mt-0.5">{iss.recommendation}</p>
+                  </div>
+                  <span className="text-[10px] font-mono opacity-60 shrink-0">{iss.type}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+          {sortedIssues.length > visibleIssues.length && (
+            <button onClick={() => setShowAllIssues(true)}
+              className="mt-3 text-xs font-medium text-blue-600 hover:text-blue-800">
+              Show {sortedIssues.length - visibleIssues.length} more issue(s)
+            </button>
+          )}
+        </div>
+      ) : (
+        <div className="px-6 py-4 flex items-center gap-2 text-sm text-green-700">
+          <CheckCircle className="w-4 h-4" /> No issues detected — robots.txt looks healthy.
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ── Main component ────────────────────────────────────────────── */
 
 const OPTIONAL_TYPES = [
@@ -1691,6 +1871,7 @@ interface SEOAgentFormValues {
   videoArticleUrl?: string;
   xmlSitemapUrl?: string;
   newsSitemapUrl?: string;
+  robotsTxtUrl?: string;
 }
 
 /* ── News Sitemap audit result (mirrors backend newsSitemapAnalyzer) ── */
@@ -1732,6 +1913,48 @@ interface NewsSitemapAuditResult {
   recommendations: string[];
 }
 
+/* ── Robots.txt audit result (mirrors backend robotsTxtAnalyzer) ── */
+
+interface RobotsTxtIssue {
+  severity: 'critical' | 'warning' | 'info';
+  priority: 'top_critical' | 'normal';
+  type: string;
+  message: string;
+  matchedRule?: string;
+  userAgent?: string;
+  url?: string;
+  field?: string;
+  recommendation: string;
+}
+
+type CrawlStatus = 'Allowed' | 'Blocked' | 'Partially Blocked' | 'Unknown';
+
+interface RobotsTxtAuditResult {
+  analyzed: boolean;
+  url: string;
+  autoDetected: boolean;
+  finalUrl: string;
+  fetched: boolean;
+  httpStatus: number;
+  contentType: string;
+  score: number;
+  status: 'Excellent' | 'Good' | 'Needs Improvement' | 'Critical Issues';
+  summary: {
+    userAgentGroups: number;
+    sitemapDirectives: number;
+    xmlSitemapDeclared: boolean;
+    newsSitemapDeclared: boolean;
+    googlebotStatus: CrawlStatus;
+    googlebotNewsStatus: CrawlStatus;
+    invalidDirectives: number;
+    criticalIssues: number;
+    warnings: number;
+  };
+  sitemaps: string[];
+  issues: RobotsTxtIssue[];
+  recommendations: string[];
+}
+
 interface SEOAgentProps {
   /** Pre-fill form fields from a saved project's last_form_values */
   initialFormValues?: SEOAgentFormValues;
@@ -1750,8 +1973,8 @@ export default function SEOAgent({
   const [articleUrl, setArticleUrl] = useState(initialFormValues?.articleUrl ?? '');
   const [optionals, setOptionals] = useState<Record<string, string>>(() => {
     if (!initialFormValues) return {};
-    // Exclude the primary + dedicated sitemap fields; the rest are optional page URLs.
-    const { homeUrl: _h, articleUrl: _a, xmlSitemapUrl: _x, newsSitemapUrl: _n, ...rest } = initialFormValues;
+    // Exclude the primary + dedicated sitemap/crawl fields; the rest are optional page URLs.
+    const { homeUrl: _h, articleUrl: _a, xmlSitemapUrl: _x, newsSitemapUrl: _n, robotsTxtUrl: _r, ...rest } = initialFormValues;
     return Object.fromEntries(
       Object.entries(rest).filter(([, v]) => typeof v === 'string' && v.trim())
     ) as Record<string, string>;
@@ -1761,6 +1984,7 @@ export default function SEOAgent({
   // XML Sitemap URL is persisted for future use.
   const [xmlSitemapUrl, setXmlSitemapUrl] = useState(initialFormValues?.xmlSitemapUrl ?? '');
   const [newsSitemapUrl, setNewsSitemapUrl] = useState(initialFormValues?.newsSitemapUrl ?? '');
+  const [robotsTxtUrl, setRobotsTxtUrl] = useState(initialFormValues?.robotsTxtUrl ?? '');
   const [showOptional, setShowOptional] = useState(false);
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState('');
@@ -1769,6 +1993,9 @@ export default function SEOAgent({
   // News Sitemap audit — independent of the main audit run/polling.
   const [newsSitemapResult, setNewsSitemapResult] = useState<NewsSitemapAuditResult | null>(null);
   const [newsSitemapLoading, setNewsSitemapLoading] = useState(false);
+  // Robots.txt audit — independent of the main audit run/polling.
+  const [robotsTxtResult, setRobotsTxtResult] = useState<RobotsTxtAuditResult | null>(null);
+  const [robotsTxtLoading, setRobotsTxtLoading] = useState(false);
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // When a past audit is loaded from history, display it immediately
@@ -1859,6 +2086,42 @@ export default function SEOAgent({
     }
   }, []);
 
+  // ── Robots.txt audit — runs independently of the main audit ───────
+  // Auto-detects robots.txt from the Home URL when no explicit URL is given.
+  const runRobotsTxtAudit = useCallback(async (
+    home: string,
+    robotsUrl: string,
+    xmlUrl: string,
+    newsUrl: string,
+    importantUrls: string[],
+  ) => {
+    const apiBase = import.meta.env.VITE_API_BASE_URL || '';
+    setRobotsTxtLoading(true);
+    setRobotsTxtResult(null);
+    try {
+      const res = await fetch(`${apiBase}/api/robots-txt/audit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: robotsUrl || undefined,
+          homeUrl: home,
+          xmlSitemapUrl: xmlUrl || undefined,
+          newsSitemapUrl: newsUrl || undefined,
+          importantUrls,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json() as { robotsTxt?: RobotsTxtAuditResult };
+        if (data.robotsTxt) setRobotsTxtResult(data.robotsTxt);
+      }
+      // Non-OK responses are swallowed — supplementary to the main audit.
+    } catch {
+      /* network error — leave result null, panel simply won't render */
+    } finally {
+      setRobotsTxtLoading(false);
+    }
+  }, []);
+
   const runAudit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!homeUrl.trim() || !articleUrl.trim()) { setError('Home URL and Article URL are required.'); return; }
@@ -1874,6 +2137,18 @@ export default function SEOAgent({
       void runNewsSitemapAudit(newsSitemapUrl.trim(), homeUrl.trim());
     } else {
       setNewsSitemapResult(null);
+    }
+
+    // Kick off the Robots.txt audit in parallel. Home URL is always present,
+    // so robots.txt is auto-detected even when no explicit URL is provided.
+    {
+      const important = [
+        articleUrl.trim(),
+        ...Object.values(optionals).map(v => v.trim()),
+      ].filter(Boolean);
+      void runRobotsTxtAudit(
+        homeUrl.trim(), robotsTxtUrl.trim(), xmlSitemapUrl.trim(), newsSitemapUrl.trim(), important,
+      );
     }
 
     try {
@@ -1943,6 +2218,7 @@ export default function SEOAgent({
         const vals: SEOAgentFormValues = { homeUrl: homeUrl.trim(), articleUrl: articleUrl.trim(), ...optionals };
         if (xmlSitemapUrl.trim()) vals.xmlSitemapUrl = xmlSitemapUrl.trim();
         if (newsSitemapUrl.trim()) vals.newsSitemapUrl = newsSitemapUrl.trim();
+        if (robotsTxtUrl.trim()) vals.robotsTxtUrl = robotsTxtUrl.trim();
         onAuditStarted(siteId, vals);
       }
       setProgress('Audit started — checking site & pages...');
@@ -2161,11 +2437,11 @@ export default function SEOAgent({
               )}
             </div>
 
-            {/* ── Sitemap URLs ─────────────────────────────────────── */}
+            {/* ── Sitemap & Crawl Control URLs ─────────────────────── */}
             <div className="border-t border-slate-100 pt-4">
               <div className="flex items-center gap-2 mb-3">
                 <Map className="w-4 h-4 text-slate-400" />
-                <span className="text-sm font-medium text-slate-600">Sitemap URLs</span>
+                <span className="text-sm font-medium text-slate-600">Sitemap &amp; Crawl Control URLs</span>
                 <span className="text-xs text-slate-400">(optional)</span>
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -2183,6 +2459,14 @@ export default function SEOAgent({
                     placeholder="https://example.com/news-sitemap.xml"
                     className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
                   <p className="text-[11px] text-slate-400 mt-1">When provided, a dedicated News Sitemap quality audit runs alongside the page checks.</p>
+                </div>
+                <div>
+                  <label htmlFor="robotsTxtUrl" className="block text-xs font-medium text-slate-500 mb-1">Robots.txt URL</label>
+                  <input id="robotsTxtUrl" type="url" value={robotsTxtUrl} disabled={loading}
+                    onChange={e => setRobotsTxtUrl(e.target.value)}
+                    placeholder="https://example.com/robots.txt"
+                    className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+                  <p className="text-[11px] text-slate-400 mt-1">Optional — auto-detected from the Home URL when left blank. A robots.txt crawlability audit runs with every audit.</p>
                 </div>
               </div>
             </div>
@@ -2204,6 +2488,13 @@ export default function SEOAgent({
             </button>
           </form>
         </div>
+
+        {/* Robots.txt Audit — independent of the main audit run */}
+        {(robotsTxtLoading || robotsTxtResult) && (
+          <div className="mb-8">
+            <RobotsTxtAuditPanel loading={robotsTxtLoading} result={robotsTxtResult} />
+          </div>
+        )}
 
         {/* News Sitemap Audit — independent of the main audit run */}
         {(newsSitemapLoading || newsSitemapResult) && (
