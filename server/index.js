@@ -167,6 +167,15 @@ try {
   console.warn('Project management routes not available:', err.message);
 }
 
+// News Sitemap audit route (isolated, additive — stateless, no DB required)
+try {
+  const { newsSitemapAuditRouter } = await import('../backend/dist/routes/newsSitemapAudit.js');
+  app.use('/api', newsSitemapAuditRouter);
+  console.log('News Sitemap audit route loaded');
+} catch (err) {
+  console.warn('News Sitemap audit route not available:', err.message);
+}
+
 // Backward-compatible Supabase-style paths (if a reverse proxy sends these)
 app.use('/functions/v1/seo-intelligence', seoIntelligenceRouter);
 app.use('/functions/v1/seo-site-crawler', seoCrawlerRouter);

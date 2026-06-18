@@ -1513,6 +1513,158 @@ function ExecutiveSummary({ score, allRecs, pageResults }: {
   );
 }
 
+/* ── News Sitemap Audit panel ──────────────────────────────────── */
+
+function NewsSitemapAuditPanel({
+  loading,
+  result,
+}: {
+  loading: boolean;
+  result: NewsSitemapAuditResult | null;
+}) {
+  const [showAllIssues, setShowAllIssues] = useState(false);
+
+  if (loading && !result) {
+    return (
+      <div className="bg-white rounded-2xl shadow-lg overflow-hidden px-6 py-5">
+        <div className="flex items-center gap-3">
+          <Newspaper className="w-5 h-5 text-slate-400" />
+          <h3 className="text-base font-bold text-slate-900">News Sitemap Audit</h3>
+          <Loader2 className="w-4 h-4 animate-spin text-blue-500" />
+          <span className="text-sm text-slate-500">Fetching & analyzing the News Sitemap…</span>
+        </div>
+      </div>
+    );
+  }
+  if (!result) return null;
+
+  const statusStyles: Record<NewsSitemapAuditResult['status'], string> = {
+    'Excellent':         'bg-green-100 text-green-700',
+    'Good':              'bg-emerald-100 text-emerald-700',
+    'Needs Improvement': 'bg-amber-100 text-amber-700',
+    'Critical Issues':   'bg-red-100 text-red-700',
+  };
+  const scoreColor =
+    result.score >= 90 ? 'text-green-600' :
+    result.score >= 75 ? 'text-emerald-600' :
+    result.score >= 50 ? 'text-amber-600' : 'text-red-600';
+
+  const sev = (s: NewsSitemapIssue['severity']) =>
+    s === 'critical' ? 'bg-red-50 border-red-200 text-red-700'
+    : s === 'warning' ? 'bg-amber-50 border-amber-200 text-amber-700'
+    : 'bg-slate-50 border-slate-200 text-slate-600';
+
+  const sortedIssues = [...result.issues].sort((a, b) => {
+    const order = { critical: 0, warning: 1, info: 2 };
+    return order[a.severity] - order[b.severity];
+  });
+  const visibleIssues = showAllIssues ? sortedIssues : sortedIssues.slice(0, 12);
+
+  const stats: Array<{ label: string; value: number; tone?: string }> = [
+    { label: 'Total URLs', value: result.summary.totalUrls },
+    { label: 'Valid news URLs', value: result.summary.validNewsUrls, tone: 'text-green-600' },
+    { label: 'Invalid news URLs', value: result.summary.invalidNewsUrls, tone: result.summary.invalidNewsUrls ? 'text-red-600' : undefined },
+    { label: 'Duplicates', value: result.summary.duplicateUrls, tone: result.summary.duplicateUrls ? 'text-amber-600' : undefined },
+    { label: 'Missing required', value: result.summary.missingRequiredFields, tone: result.summary.missingRequiredFields ? 'text-red-600' : undefined },
+    { label: 'Old/invalid dates', value: result.summary.oldOrInvalidDates, tone: result.summary.oldOrInvalidDates ? 'text-amber-600' : undefined },
+    { label: 'Image issues', value: result.summary.imageIssues, tone: result.summary.imageIssues ? 'text-amber-600' : undefined },
+    { label: 'Namespace issues', value: result.summary.namespaceIssues, tone: result.summary.namespaceIssues ? 'text-red-600' : undefined },
+    { label: 'Critical', value: result.summary.criticalIssues, tone: result.summary.criticalIssues ? 'text-red-700' : undefined },
+    { label: 'Warnings', value: result.summary.warnings, tone: result.summary.warnings ? 'text-amber-600' : undefined },
+  ];
+
+  return (
+    <div className="bg-white rounded-2xl shadow-lg overflow-hidden">
+      {/* Header */}
+      <div className="p-6 flex flex-col sm:flex-row items-center gap-5">
+        <div className="flex flex-col items-center justify-center w-24 h-24 rounded-2xl bg-slate-50 border border-slate-100 shrink-0">
+          <span className={`text-3xl font-bold ${scoreColor}`}>{result.score}</span>
+          <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">/ 100</span>
+        </div>
+        <div className="flex-1 text-center sm:text-left min-w-0">
+          <div className="flex items-center gap-2 justify-center sm:justify-start">
+            <Newspaper className="w-5 h-5 text-slate-500" />
+            <h3 className="text-lg font-bold text-slate-900">News Sitemap Audit</h3>
+            <span className={`text-xs font-semibold px-2.5 py-0.5 rounded-full ${statusStyles[result.status]}`}>{result.status}</span>
+          </div>
+          <p className="text-xs text-slate-500 mt-1 font-mono truncate" title={result.url}>{result.url}</p>
+          {result.isSitemapIndex && (
+            <p className="text-[11px] text-amber-600 mt-1">A sitemap index was supplied; the first child sitemap was analyzed.</p>
+          )}
+          {(result.publicationNames.length > 0 || result.languages.length > 0) && (
+            <p className="text-[11px] text-slate-400 mt-1">
+              {result.publicationNames.length > 0 && <>Publication: {result.publicationNames.slice(0, 3).join(', ')}</>}
+              {result.publicationNames.length > 0 && result.languages.length > 0 && ' · '}
+              {result.languages.length > 0 && <>Language: {result.languages.slice(0, 3).join(', ')}</>}
+            </p>
+          )}
+        </div>
+      </div>
+
+      {/* Stat grid */}
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-px bg-slate-100 border-y border-slate-100">
+        {stats.map(s => (
+          <div key={s.label} className="bg-white px-3 py-2.5 text-center">
+            <p className={`text-lg font-bold ${s.tone ?? 'text-slate-700'}`}>{s.value}</p>
+            <p className="text-[10px] font-medium text-slate-400 uppercase tracking-wide">{s.label}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* Recommendations */}
+      {result.recommendations.length > 0 && (
+        <div className="px-6 py-4 border-b border-slate-100">
+          <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Recommendations</h4>
+          <ul className="space-y-1">
+            {result.recommendations.map((r, i) => (
+              <li key={i} className="flex items-start gap-2 text-sm text-slate-600">
+                <CheckCircle className="w-4 h-4 text-blue-500 mt-0.5 shrink-0" />
+                <span>{r}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Issues */}
+      {sortedIssues.length > 0 ? (
+        <div className="px-6 py-4">
+          <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">
+            Issues ({sortedIssues.length})
+          </h4>
+          <div className="space-y-2">
+            {visibleIssues.map((iss, i) => (
+              <div key={i} className={`border rounded-lg px-3 py-2 ${sev(iss.severity)}`}>
+                <div className="flex items-start gap-2">
+                  {iss.severity === 'critical' ? <XCircle className="w-4 h-4 mt-0.5 shrink-0" />
+                    : iss.severity === 'warning' ? <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+                    : <Info className="w-4 h-4 mt-0.5 shrink-0" />}
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium">{iss.message}</p>
+                    {iss.url && <p className="text-[11px] font-mono opacity-70 truncate" title={iss.url}>{iss.url}</p>}
+                    <p className="text-[11px] opacity-80 mt-0.5">{iss.recommendation}</p>
+                  </div>
+                  <span className="text-[10px] font-mono opacity-60 shrink-0">{iss.type}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+          {sortedIssues.length > visibleIssues.length && (
+            <button onClick={() => setShowAllIssues(true)}
+              className="mt-3 text-xs font-medium text-blue-600 hover:text-blue-800">
+              Show {sortedIssues.length - visibleIssues.length} more issue(s)
+            </button>
+          )}
+        </div>
+      ) : (
+        <div className="px-6 py-4 flex items-center gap-2 text-sm text-green-700">
+          <CheckCircle className="w-4 h-4" /> No issues detected — the News Sitemap looks healthy.
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ── Main component ────────────────────────────────────────────── */
 
 const OPTIONAL_TYPES = [
@@ -1537,6 +1689,47 @@ interface SEOAgentFormValues {
   searchUrl?: string;
   authorUrl?: string;
   videoArticleUrl?: string;
+  xmlSitemapUrl?: string;
+  newsSitemapUrl?: string;
+}
+
+/* ── News Sitemap audit result (mirrors backend newsSitemapAnalyzer) ── */
+
+interface NewsSitemapIssue {
+  severity: 'critical' | 'warning' | 'info';
+  type: string;
+  message: string;
+  url?: string;
+  field?: string;
+  recommendation: string;
+}
+
+interface NewsSitemapAuditResult {
+  analyzed: boolean;
+  url: string;
+  finalUrl: string;
+  fetched: boolean;
+  httpStatus: number;
+  isSitemapIndex: boolean;
+  childSitemaps: string[];
+  score: number;
+  status: 'Excellent' | 'Good' | 'Needs Improvement' | 'Critical Issues';
+  summary: {
+    totalUrls: number;
+    validNewsUrls: number;
+    invalidNewsUrls: number;
+    duplicateUrls: number;
+    missingRequiredFields: number;
+    oldOrInvalidDates: number;
+    imageIssues: number;
+    namespaceIssues: number;
+    criticalIssues: number;
+    warnings: number;
+  };
+  publicationNames: string[];
+  languages: string[];
+  issues: NewsSitemapIssue[];
+  recommendations: string[];
 }
 
 interface SEOAgentProps {
@@ -1557,16 +1750,25 @@ export default function SEOAgent({
   const [articleUrl, setArticleUrl] = useState(initialFormValues?.articleUrl ?? '');
   const [optionals, setOptionals] = useState<Record<string, string>>(() => {
     if (!initialFormValues) return {};
-    const { homeUrl: _h, articleUrl: _a, ...rest } = initialFormValues;
+    // Exclude the primary + dedicated sitemap fields; the rest are optional page URLs.
+    const { homeUrl: _h, articleUrl: _a, xmlSitemapUrl: _x, newsSitemapUrl: _n, ...rest } = initialFormValues;
     return Object.fromEntries(
       Object.entries(rest).filter(([, v]) => typeof v === 'string' && v.trim())
     ) as Record<string, string>;
   });
+  // Sitemap URLs — dedicated state so they persist with their canonical keys
+  // (independent of the optional page-URL bag). News Sitemap is analyzed; the
+  // XML Sitemap URL is persisted for future use.
+  const [xmlSitemapUrl, setXmlSitemapUrl] = useState(initialFormValues?.xmlSitemapUrl ?? '');
+  const [newsSitemapUrl, setNewsSitemapUrl] = useState(initialFormValues?.newsSitemapUrl ?? '');
   const [showOptional, setShowOptional] = useState(false);
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState('');
   const [error, setError] = useState('');
   const [runData, setRunData] = useState<AuditRunData | null>(initialRunData ?? null);
+  // News Sitemap audit — independent of the main audit run/polling.
+  const [newsSitemapResult, setNewsSitemapResult] = useState<NewsSitemapAuditResult | null>(null);
+  const [newsSitemapLoading, setNewsSitemapLoading] = useState(false);
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // When a past audit is loaded from history, display it immediately
@@ -1629,6 +1831,34 @@ export default function SEOAgent({
     }
   }, []);
 
+  // ── News Sitemap audit — runs independently of the main audit ──────
+  // Fire-and-forget: never blocks or alters the existing audit workflow.
+  const runNewsSitemapAudit = useCallback(async (sitemapUrl: string, home: string) => {
+    const apiBase = import.meta.env.VITE_API_BASE_URL || '';
+    let expectedDomain: string | undefined;
+    try { expectedDomain = new URL(home).hostname; } catch { expectedDomain = undefined; }
+
+    setNewsSitemapLoading(true);
+    setNewsSitemapResult(null);
+    try {
+      const res = await fetch(`${apiBase}/api/news-sitemap/audit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: sitemapUrl, expectedDomain }),
+      });
+      if (res.ok) {
+        const data = await res.json() as { newsSitemap?: NewsSitemapAuditResult };
+        if (data.newsSitemap) setNewsSitemapResult(data.newsSitemap);
+      }
+      // Non-OK responses are swallowed — the News Sitemap audit is supplementary
+      // and must never surface as a failure of the main technical audit.
+    } catch {
+      /* network error — leave result null, panel simply won't render */
+    } finally {
+      setNewsSitemapLoading(false);
+    }
+  }, []);
+
   const runAudit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!homeUrl.trim() || !articleUrl.trim()) { setError('Home URL and Article URL are required.'); return; }
@@ -1638,6 +1868,13 @@ export default function SEOAgent({
     setError('');
     setRunData(null);
     setProgress('Starting audit...');
+
+    // Kick off the optional News Sitemap audit in parallel (does not block).
+    if (newsSitemapUrl.trim()) {
+      void runNewsSitemapAudit(newsSitemapUrl.trim(), homeUrl.trim());
+    } else {
+      setNewsSitemapResult(null);
+    }
 
     try {
       const apiBase = import.meta.env.VITE_API_BASE_URL || '';
@@ -1704,6 +1941,8 @@ export default function SEOAgent({
       // Notify project layer of the site id so it can save form values
       if (siteId && onAuditStarted) {
         const vals: SEOAgentFormValues = { homeUrl: homeUrl.trim(), articleUrl: articleUrl.trim(), ...optionals };
+        if (xmlSitemapUrl.trim()) vals.xmlSitemapUrl = xmlSitemapUrl.trim();
+        if (newsSitemapUrl.trim()) vals.newsSitemapUrl = newsSitemapUrl.trim();
         onAuditStarted(siteId, vals);
       }
       setProgress('Audit started — checking site & pages...');
@@ -1922,6 +2161,32 @@ export default function SEOAgent({
               )}
             </div>
 
+            {/* ── Sitemap URLs ─────────────────────────────────────── */}
+            <div className="border-t border-slate-100 pt-4">
+              <div className="flex items-center gap-2 mb-3">
+                <Map className="w-4 h-4 text-slate-400" />
+                <span className="text-sm font-medium text-slate-600">Sitemap URLs</span>
+                <span className="text-xs text-slate-400">(optional)</span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label htmlFor="xmlSitemapUrl" className="block text-xs font-medium text-slate-500 mb-1">XML Sitemap URL</label>
+                  <input id="xmlSitemapUrl" type="url" value={xmlSitemapUrl} disabled={loading}
+                    onChange={e => setXmlSitemapUrl(e.target.value)}
+                    placeholder="https://example.com/sitemap.xml"
+                    className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+                </div>
+                <div>
+                  <label htmlFor="newsSitemapUrl" className="block text-xs font-medium text-slate-500 mb-1">News Sitemap URL (Google News)</label>
+                  <input id="newsSitemapUrl" type="url" value={newsSitemapUrl} disabled={loading}
+                    onChange={e => setNewsSitemapUrl(e.target.value)}
+                    placeholder="https://example.com/news-sitemap.xml"
+                    className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+                  <p className="text-[11px] text-slate-400 mt-1">When provided, a dedicated News Sitemap quality audit runs alongside the page checks.</p>
+                </div>
+              </div>
+            </div>
+
             {error && (
               <div className="flex items-center gap-2 text-red-600 bg-red-50 px-4 py-3 rounded-lg">
                 <AlertCircle className="w-5 h-5 shrink-0" />
@@ -1939,6 +2204,13 @@ export default function SEOAgent({
             </button>
           </form>
         </div>
+
+        {/* News Sitemap Audit — independent of the main audit run */}
+        {(newsSitemapLoading || newsSitemapResult) && (
+          <div className="mb-8">
+            <NewsSitemapAuditPanel loading={newsSitemapLoading} result={newsSitemapResult} />
+          </div>
+        )}
 
         {/* Results */}
         {runData && (
