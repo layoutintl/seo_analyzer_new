@@ -185,6 +185,17 @@ try {
   console.warn('Robots.txt audit route not available:', err.message);
 }
 
+// AI Assist route (isolated, additive — server-side NVIDIA NIM calls).
+// Optional: if NVIDIA_API_KEY / NVIDIA_BASE_URL / NVIDIA_MODEL are not all set,
+// the endpoints respond with a clean disabled-fallback and the audit keeps working.
+try {
+  const { aiAssistRouter } = await import('../backend/dist/routes/aiAssist.js');
+  app.use('/api', aiAssistRouter);
+  console.log('AI Assist route loaded');
+} catch (err) {
+  console.warn('AI Assist route not available:', err.message);
+}
+
 // Backward-compatible Supabase-style paths (if a reverse proxy sends these)
 app.use('/functions/v1/seo-intelligence', seoIntelligenceRouter);
 app.use('/functions/v1/seo-site-crawler', seoCrawlerRouter);
