@@ -5,6 +5,8 @@ import {
   Globe, FileSearch, Code2, FileText, Link, Zap, Newspaper, Download,
   Filter, Info, Clipboard, FileDown,
 } from 'lucide-react';
+import AiAssist from './AiAssist';
+import AiDebug from './AiDebug';
 
 /* ── Types ─────────────────────────────────────────────────────── */
 
@@ -1052,7 +1054,7 @@ function QuickFilters({ filter, setFilter, counts }: { filter: FilterMode; setFi
   );
 }
 
-function PageAuditSection({ title, url, groups, status }: { title: string; url: string; groups: CheckGroup[]; status: string | null }) {
+function PageAuditSection({ title, url, groups, status, data, recommendations }: { title: string; url: string; groups: CheckGroup[]; status: string | null; data?: Record<string, unknown> | null; recommendations?: Recommendation[] | null }) {
   const [open, setOpen] = useState(true);
   const [filter, setFilter] = useState<FilterMode>('all');
 
@@ -1106,6 +1108,7 @@ function PageAuditSection({ title, url, groups, status }: { title: string; url: 
               <CheckGroupCard key={group.id} group={group} filter={filter} defaultOpen={group.checks.some(c => c.status === 'fail' || c.status === 'warn')} />
             ))}
           </div>
+          <AiAssist url={url} data={data ?? null} recommendations={recommendations ?? null} />
         </div>
       )}
     </div>
@@ -2609,6 +2612,8 @@ export default function SEOAgent({
               </div>
             </div>
 
+            <AiDebug auditAvailable={!!runData} pageCount={runData.results.length} />
+
             <ExecutiveSummary score={overallScore} allRecs={allRecs} pageResults={pageResultsSummary} />
 
             <LayeredScorePanel results={runData.results.map(r => ({ data: r.data as Record<string, unknown> | null, url: r.url }))} />
@@ -2619,7 +2624,7 @@ export default function SEOAgent({
               homeResult.data?.checksSkipped
                 ? <CrawlGatePanel title="Homepage Audit" url={homeResult.url} row={homeResult} />
                 : homeGroups.length > 0
-                  ? <PageAuditSection title="Homepage Audit" url={homeResult.url} groups={homeGroups} status={homeResult.status} />
+                  ? <PageAuditSection title="Homepage Audit" url={homeResult.url} groups={homeGroups} status={homeResult.status} data={homeResult.data} recommendations={homeResult.recommendations} />
                   : null
             )}
 
@@ -2627,7 +2632,7 @@ export default function SEOAgent({
               articleResult.data?.checksSkipped
                 ? <CrawlGatePanel title="Article Page Audit" url={articleResult.url} row={articleResult} />
                 : articleGroups.length > 0
-                  ? <PageAuditSection title="Article Page Audit" url={articleResult.url} groups={articleGroups} status={articleResult.status} />
+                  ? <PageAuditSection title="Article Page Audit" url={articleResult.url} groups={articleGroups} status={articleResult.status} data={articleResult.data} recommendations={articleResult.recommendations} />
                   : (
                     <div className="bg-white rounded-2xl shadow-lg overflow-hidden px-6 py-4">
                       <div className="flex items-center gap-3">
@@ -2652,7 +2657,7 @@ export default function SEOAgent({
               const title = `${labels[pt] ?? pt.charAt(0).toUpperCase() + pt.slice(1)} Page Audit`;
               if (row.data?.checksSkipped) return <CrawlGatePanel key={row.id} title={title} url={row.url} row={row} />;
               return groups.length > 0 ? (
-                <PageAuditSection key={row.id} title={title} url={row.url} groups={groups} status={row.status} />
+                <PageAuditSection key={row.id} title={title} url={row.url} groups={groups} status={row.status} data={row.data} recommendations={row.recommendations} />
               ) : null;
             })}
 
