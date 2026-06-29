@@ -188,13 +188,27 @@ try {
 // AI Assist route (isolated, additive — server-side NVIDIA NIM calls).
 // Optional: if NVIDIA_API_KEY / NVIDIA_BASE_URL / NVIDIA_MODEL are not all set,
 // the endpoints respond with a clean disabled-fallback and the audit keeps working.
+let aiRouteIncluded = false;
 try {
   const { aiAssistRouter } = await import('../backend/dist/routes/aiAssist.js');
   app.use('/api', aiAssistRouter);
+  aiRouteIncluded = true;
   console.log('AI Assist route loaded');
 } catch (err) {
-  console.warn('AI Assist route not available:', err.message);
+  console.error('AI Assist route failed to load:', err.message);
 }
+
+// Build/runtime diagnostics — confirm the deployed container runs the latest code.
+const BUILD_TIME = new Date().toISOString();
+app.get('/api/build-info', (_req, res) => {
+  res.json({
+    app: 'seo-analyzer',
+    aiRouteIncluded,
+    model: process.env.NVIDIA_MODEL || null,
+    buildTime: BUILD_TIME,
+    nodeEnv: process.env.NODE_ENV || null,
+  });
+});
 
 // Backward-compatible Supabase-style paths (if a reverse proxy sends these)
 app.use('/functions/v1/seo-intelligence', seoIntelligenceRouter);
