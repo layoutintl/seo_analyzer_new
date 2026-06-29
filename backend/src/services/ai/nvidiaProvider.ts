@@ -136,6 +136,7 @@ export async function testNvidiaConnection(): Promise<{
   ok: boolean;
   status: 'disabled' | 'success' | 'failed';
   message: string;
+  model: string | null;
   config: ReturnType<typeof getConfigStatus>;
   latencyMs?: number;
   sample?: string;
@@ -153,12 +154,20 @@ export async function testNvidiaConnection(): Promise<{
       ok: false,
       status: 'disabled',
       message: `AI disabled — missing env var(s): ${missing.join(', ')}`,
+      model: status.model,
       config: status,
     };
   }
 
+  // Minimal test request. We ask for a one-sentence confirmation rather than a
+  // single token — some NIM models (e.g. diffusiongemma) return empty content
+  // for ultra-short prompts, so a sentence-length ask is a reliable probe.
   const startedAt = Date.now();
-  const raw = await callNvidiaChat('Reply with the single word: OK', 15_000);
+  const raw = await callNvidiaChat('Respond with a one-sentence confirmation that you are working.', {
+    timeoutMs: 30_000,
+    maxTokens: 128,
+    withSystemPrompt: false,
+  });
   const latencyMs = Date.now() - startedAt;
 
   if (raw == null) {
@@ -168,6 +177,7 @@ export async function testNvidiaConnection(): Promise<{
       message:
         'NVIDIA call failed (timeout, auth error, wrong base URL/model, or network). ' +
         'Check server logs for the [nvidiaProvider] line.',
+      model: config.model,
       config: status,
       latencyMs,
     };
@@ -177,6 +187,7 @@ export async function testNvidiaConnection(): Promise<{
     ok: true,
     status: 'success',
     message: 'NVIDIA NIM connection succeeded.',
+    model: config.model,
     config: status,
     latencyMs,
     sample: raw.slice(0, 200),
@@ -192,26 +203,44 @@ interface ChatMessage {
   content: string;
 }
 
+interface CallOptions {
+  /** Abort after this many ms. */
+  timeoutMs?: number;
+  /** Cap output tokens. Normal assist calls use 4096; the connection test uses 64. */
+  maxTokens?: number;
+  /** When false, omit the system prompt (used by the minimal connection test). */
+  withSystemPrompt?: boolean;
+}
+
 /**
  * POST `${NVIDIA_BASE_URL}/chat/completions` (OpenAI-compatible).
  * Returns the assistant message string, or null on any failure.
- * Never throws.
+ * Never throws. We keep the request body deliberately simple — no
+ * model-specific flags like chat_template_kwargs — so it works across NVIDIA
+ * NIM models (e.g. google/diffusiongemma-26b-a4b-it) without 400 errors.
  */
 async function callNvidiaChat(
   userContent: string,
-  timeoutMs = DEFAULT_TIMEOUT_MS,
+  opts: CallOptions = {},
 ): Promise<string | null> {
   const config = getNvidiaConfig();
   if (!config) return null;
+
+  // Never send empty user content upstream — it wastes a call and some models 400.
+  if (!userContent || !userContent.trim()) {
+    console.warn('[nvidiaProvider] Refusing to send empty user content');
+    return null;
+  }
+
+  const { timeoutMs = DEFAULT_TIMEOUT_MS, maxTokens = 4096, withSystemPrompt = true } = opts;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const messages: ChatMessage[] = [
-      { role: 'system', content: SYSTEM_PROMPT },
-      { role: 'user', content: userContent },
-    ];
+    const messages: ChatMessage[] = [];
+    if (withSystemPrompt) messages.push({ role: 'system', content: SYSTEM_PROMPT });
+    messages.push({ role: 'user', content: userContent });
 
     const res = await fetch(`${config.baseUrl}/chat/completions`, {
       method: 'POST',
@@ -222,19 +251,19 @@ async function callNvidiaChat(
       body: JSON.stringify({
         model: config.model,
         messages,
-        temperature: 0.3,
-        max_tokens: 1200,
-        // These SEO helpers want a fast, clean answer — not chain-of-thought.
-        // Reasoning models (e.g. Nemotron) otherwise spend the token budget on
-        // hidden thinking, which is slow and can leave message.content empty.
-        // Ignored harmlessly by models that don't support the flag.
-        chat_template_kwargs: { enable_thinking: false },
+        max_tokens: maxTokens,
+        temperature: 1.0,
+        top_p: 0.95,
+        stream: false,
       }),
       signal: controller.signal,
     });
 
     if (!res.ok) {
-      console.warn(`[nvidiaProvider] NVIDIA API responded ${res.status} ${res.statusText}`);
+      const detail = await res.text().catch(() => '');
+      console.warn(
+        `[nvidiaProvider] NVIDIA API responded ${res.status} ${res.statusText} ${detail.slice(0, 300)}`,
+      );
       return null;
     }
 
@@ -369,18 +398,45 @@ function langLine(language?: string): string {
   return lang ? `Write all human-readable text in this language: ${lang}.` : 'Write in English.';
 }
 
+/** Where to place raw prose when a model returns text instead of strict JSON. */
+type PrimaryField =
+  | 'summary'
+  | 'client_explanation'
+  | 'technical_explanation'
+  | 'example_copy';
+
 /**
  * Shared runner: builds the prompt, calls NVIDIA, parses, and falls back safely.
+ *
+ * Some NIM models (e.g. google/diffusiongemma-26b-a4b-it) are chatty and ignore
+ * strict-JSON instructions, returning Markdown prose. Rather than show the user
+ * an empty result, we degrade gracefully: the raw text is placed into the most
+ * relevant field for the action so the AI Assist panel still shows useful output.
  */
-async function runStructured(promptBody: string): Promise<AiStructuredResponse> {
+async function runStructured(
+  promptBody: string,
+  primaryField: PrimaryField,
+): Promise<AiStructuredResponse> {
   if (!isAiEnabled()) return fallbackResponse('AI provider not configured', false);
 
-  const raw = await callNvidiaChat(`${promptBody}\n${jsonInstruction()}`);
+  const raw = await callNvidiaChat(`${promptBody}\n${jsonInstruction()}`, { maxTokens: 4096 });
   if (raw == null) return fallbackResponse('AI request failed or timed out', true);
 
   const parsed = parseStructuredResponse(raw);
-  if (!parsed) return fallbackResponse('AI returned an unparseable response', true);
-  return parsed;
+  if (parsed) return parsed;
+
+  // Not valid JSON — surface the prose in the primary field instead of failing.
+  return {
+    summary: '',
+    priority: 'medium',
+    client_explanation: '',
+    technical_explanation: '',
+    recommended_fix: '',
+    example_copy: '',
+    confidence: 0.5,
+    ai_available: true,
+    [primaryField]: raw.trim(),
+  };
 }
 
 /* ────────────────────────────────────────────────────────────────────────
@@ -406,7 +462,7 @@ export function generateAuditExplanation(
     '',
     `Detected finding: ${safeJson(auditFinding)}`,
   ].join('\n');
-  return runStructured(body);
+  return runStructured(body, 'technical_explanation');
 }
 
 /**
@@ -430,7 +486,7 @@ export function generateClientRecommendation(
     '',
     `Detected finding: ${safeJson(auditFinding)}`,
   ].join('\n');
-  return runStructured(body);
+  return runStructured(body, 'client_explanation');
 }
 
 /**
@@ -457,7 +513,7 @@ export function rewriteMetaTitle(
   ]
     .filter(Boolean)
     .join('\n');
-  return runStructured(body);
+  return runStructured(body, 'example_copy');
 }
 
 /**
@@ -484,7 +540,7 @@ export function rewriteMetaDescription(
   ]
     .filter(Boolean)
     .join('\n');
-  return runStructured(body);
+  return runStructured(body, 'example_copy');
 }
 
 /** JSON.stringify that never throws and stays bounded. */
