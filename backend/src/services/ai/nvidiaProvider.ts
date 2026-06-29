@@ -88,6 +88,97 @@ export function isAiEnabled(): boolean {
   return getNvidiaConfig() !== null;
 }
 
+/**
+ * Non-secret diagnostics for the /api/ai/status and /api/ai/test endpoints.
+ * Reports WHICH of the three vars are present (booleans only) plus the model
+ * name and the base URL's host — never the API key itself.
+ */
+export function getConfigStatus(): {
+  enabled: boolean;
+  hasApiKey: boolean;
+  hasBaseUrl: boolean;
+  hasModel: boolean;
+  baseUrlHost: string | null;
+  model: string | null;
+} {
+  const hasApiKey = !!(process.env.NVIDIA_API_KEY ?? '').trim();
+  const hasBaseUrl = !!(process.env.NVIDIA_BASE_URL ?? '').trim();
+  const hasModel = !!(process.env.NVIDIA_MODEL ?? '').trim();
+  const config = getNvidiaConfig();
+  let baseUrlHost: string | null = null;
+  if (config) {
+    try {
+      baseUrlHost = new URL(config.baseUrl).host;
+    } catch {
+      baseUrlHost = config.baseUrl;
+    }
+  }
+  return {
+    enabled: config !== null,
+    hasApiKey,
+    hasBaseUrl,
+    hasModel,
+    baseUrlHost,
+    model: config?.model ?? null,
+  };
+}
+
+/**
+ * Live connection test: makes one tiny chat-completions call and reports the
+ * outcome with latency. Never throws — returns a structured diagnostic. Use
+ * from /api/ai/test to verify the NVIDIA key/URL/model actually work end-to-end.
+ */
+export async function testNvidiaConnection(): Promise<{
+  ok: boolean;
+  status: 'disabled' | 'success' | 'failed';
+  message: string;
+  config: ReturnType<typeof getConfigStatus>;
+  latencyMs?: number;
+  sample?: string;
+}> {
+  const config = getNvidiaConfig();
+  const status = getConfigStatus();
+
+  if (!config) {
+    const missing = [
+      !status.hasApiKey ? 'NVIDIA_API_KEY' : null,
+      !status.hasBaseUrl ? 'NVIDIA_BASE_URL' : null,
+      !status.hasModel ? 'NVIDIA_MODEL' : null,
+    ].filter(Boolean);
+    return {
+      ok: false,
+      status: 'disabled',
+      message: `AI disabled — missing env var(s): ${missing.join(', ')}`,
+      config: status,
+    };
+  }
+
+  const startedAt = Date.now();
+  const raw = await callNvidiaChat('Reply with the single word: OK', 15_000);
+  const latencyMs = Date.now() - startedAt;
+
+  if (raw == null) {
+    return {
+      ok: false,
+      status: 'failed',
+      message:
+        'NVIDIA call failed (timeout, auth error, wrong base URL/model, or network). ' +
+        'Check server logs for the [nvidiaProvider] line.',
+      config: status,
+      latencyMs,
+    };
+  }
+
+  return {
+    ok: true,
+    status: 'success',
+    message: 'NVIDIA NIM connection succeeded.',
+    config: status,
+    latencyMs,
+    sample: raw.slice(0, 200),
+  };
+}
+
 /* ────────────────────────────────────────────────────────────────────────
  * Low-level NVIDIA call
  * ──────────────────────────────────────────────────────────────────────── */

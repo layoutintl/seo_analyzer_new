@@ -30,7 +30,8 @@
 
 import { Router, Request, Response } from 'express';
 import {
-  isAiEnabled,
+  getConfigStatus,
+  testNvidiaConnection,
   generateAuditExplanation,
   generateClientRecommendation,
   rewriteMetaTitle,
@@ -61,8 +62,22 @@ const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 const optStr = (v: unknown): string | undefined =>
   typeof v === 'string' && v.trim() ? v : undefined;
 
+// Lightweight, no-network status. Used by the UI to show/hide AI actions and
+// includes non-secret diagnostics (which env vars are present) for debugging.
 aiAssistRouter.get('/ai/status', (_req: Request, res: Response) => {
-  res.json({ enabled: isAiEnabled() });
+  res.json(getConfigStatus());
+});
+
+// Live connection test — makes one tiny NVIDIA call and reports the outcome.
+// Open this in a browser or curl it to verify the deployment end-to-end.
+aiAssistRouter.get('/ai/test', async (_req: Request, res: Response) => {
+  try {
+    const result = await testNvidiaConnection();
+    res.status(result.ok ? 200 : 503).json(result);
+  } catch (err) {
+    console.error('GET /api/ai/test error:', err);
+    res.status(500).json({ ok: false, status: 'failed', message: 'Unexpected error during AI test' });
+  }
 });
 
 aiAssistRouter.post('/ai/explain', async (req: Request, res: Response) => {
