@@ -1,0 +1,398 @@
+/**
+ * NVIDIA NIM AI Provider — optional, additive backend AI layer.
+ *
+ * This module NEVER decides whether an SEO issue exists. It runs strictly
+ * AFTER the deterministic audit engine has produced a finding, and only
+ * explains, summarizes, prioritizes, or rewrites copy for an issue that the
+ * crawler / checklist / severity logic already detected.
+ *
+ * Safety contract:
+ *   - Reads config from the three env vars the operator provided:
+ *       NVIDIA_API_KEY, NVIDIA_BASE_URL, NVIDIA_MODEL
+ *   - If ANY of them is missing, AI features are disabled and every public
+ *     function returns a clean disabled-fallback. The audit keeps working.
+ *   - All network calls are server-side only and time-bounded. On any error
+ *     (timeout, non-2xx, bad JSON) we return a structured fallback rather than
+ *     throwing, so the audit page never breaks.
+ *   - Only a small, bounded slice of page context is ever sent to NVIDIA —
+ *     never the full crawl payload or raw page HTML.
+ */
+
+const SYSTEM_PROMPT =
+  'You are an expert SEO audit assistant. You explain existing SEO audit ' +
+  'findings clearly. You do not invent issues.';
+
+/** Default request timeout. Keep short so a slow upstream never hangs the UI. */
+const DEFAULT_TIMEOUT_MS = 20_000;
+
+export type Priority = 'low' | 'medium' | 'high' | 'critical';
+
+/** The structured shape every AI helper resolves to. */
+export interface AiStructuredResponse {
+  summary: string;
+  priority: Priority;
+  client_explanation: string;
+  technical_explanation: string;
+  recommended_fix: string;
+  example_copy: string;
+  confidence: number;
+  /** Present only when the response is a graceful fallback (no/failed AI). */
+  ai_available?: boolean;
+  error?: string;
+}
+
+/** Minimal, bounded context passed in from the caller (the route layer). */
+export interface PageContext {
+  url?: string;
+  /** The audit issue / check key, e.g. "missing-meta-description". */
+  issueType?: string;
+  currentTitle?: string;
+  currentMetaDescription?: string;
+  /** Short summary of the H1/H2 outline — NOT the full DOM. */
+  headingSummary?: string;
+  /** The detected issue data straight from the deterministic audit. */
+  detectedIssue?: unknown;
+  /** Optional, limited page text. Caller must keep this small. */
+  pageTextExcerpt?: string;
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+ * Configuration
+ * ──────────────────────────────────────────────────────────────────────── */
+
+interface NvidiaConfig {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+}
+
+/**
+ * Reads NVIDIA config from the environment. Returns null when any of the three
+ * required variables is absent/blank — the signal that AI features are off.
+ *
+ * Uses ONLY: process.env.NVIDIA_API_KEY / NVIDIA_BASE_URL / NVIDIA_MODEL.
+ */
+function getNvidiaConfig(): NvidiaConfig | null {
+  const apiKey = (process.env.NVIDIA_API_KEY ?? '').trim();
+  const baseUrl = (process.env.NVIDIA_BASE_URL ?? '').trim();
+  const model = (process.env.NVIDIA_MODEL ?? '').trim();
+
+  if (!apiKey || !baseUrl || !model) return null;
+
+  // Normalise: drop any trailing slash so `${baseUrl}/chat/completions` is clean.
+  return { apiKey, baseUrl: baseUrl.replace(/\/+$/, ''), model };
+}
+
+/** Public, side-effect-free check the route/UI can use to show or hide AI actions. */
+export function isAiEnabled(): boolean {
+  return getNvidiaConfig() !== null;
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+ * Low-level NVIDIA call
+ * ──────────────────────────────────────────────────────────────────────── */
+
+interface ChatMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+}
+
+/**
+ * POST `${NVIDIA_BASE_URL}/chat/completions` (OpenAI-compatible).
+ * Returns the assistant message string, or null on any failure.
+ * Never throws.
+ */
+async function callNvidiaChat(
+  userContent: string,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+): Promise<string | null> {
+  const config = getNvidiaConfig();
+  if (!config) return null;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const messages: ChatMessage[] = [
+      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'user', content: userContent },
+    ];
+
+    const res = await fetch(`${config.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${config.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: config.model,
+        messages,
+        temperature: 0.3,
+        max_tokens: 1200,
+      }),
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      console.warn(`[nvidiaProvider] NVIDIA API responded ${res.status} ${res.statusText}`);
+      return null;
+    }
+
+    const json = (await res.json()) as {
+      choices?: Array<{ message?: { content?: string | null } }>;
+    };
+    const content = json?.choices?.[0]?.message?.content;
+    return typeof content === 'string' && content.trim() ? content : null;
+  } catch (err) {
+    // AbortError (timeout) and network errors all land here — stay silent-safe.
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[nvidiaProvider] NVIDIA call failed: ${msg}`);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+ * Response parsing & fallbacks
+ * ──────────────────────────────────────────────────────────────────────── */
+
+const VALID_PRIORITIES: Priority[] = ['low', 'medium', 'high', 'critical'];
+
+/** A clean, predictable fallback when AI is off or the call/parse fails. */
+function fallbackResponse(reason: string, aiAvailable: boolean): AiStructuredResponse {
+  return {
+    summary: '',
+    priority: 'medium',
+    client_explanation: '',
+    technical_explanation: '',
+    recommended_fix: '',
+    example_copy: '',
+    confidence: 0,
+    ai_available: aiAvailable,
+    error: reason,
+  };
+}
+
+/**
+ * Pull a JSON object out of the model's text. Reasoning-style models may wrap
+ * JSON in ```json fences or precede it with prose, so we extract the first
+ * balanced `{ ... }` block before parsing. Returns a normalised, fully-typed
+ * structured response, or null if nothing usable was found.
+ */
+function parseStructuredResponse(raw: string): AiStructuredResponse | null {
+  let text = raw.trim();
+
+  // Strip Markdown code fences if present.
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) text = fence[1].trim();
+
+  // Fall back to the first {...} span if there is leading/trailing prose.
+  if (!text.startsWith('{')) {
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
+    if (start === -1 || end === -1 || end <= start) return null;
+    text = text.slice(start, end + 1);
+  }
+
+  let obj: Record<string, unknown>;
+  try {
+    obj = JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+
+  const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+  const priorityRaw = String(obj.priority ?? '').toLowerCase() as Priority;
+  const priority: Priority = VALID_PRIORITIES.includes(priorityRaw) ? priorityRaw : 'medium';
+
+  let confidence = Number(obj.confidence);
+  if (!Number.isFinite(confidence)) confidence = 0;
+  confidence = Math.min(1, Math.max(0, confidence));
+
+  return {
+    summary: str(obj.summary),
+    priority,
+    client_explanation: str(obj.client_explanation),
+    technical_explanation: str(obj.technical_explanation),
+    recommended_fix: str(obj.recommended_fix),
+    example_copy: str(obj.example_copy),
+    confidence,
+    ai_available: true,
+  };
+}
+
+/** Build the JSON-output contract appended to every prompt. */
+function jsonInstruction(): string {
+  return [
+    '',
+    'Respond with ONLY a single valid JSON object, no Markdown, using exactly these keys:',
+    '{',
+    '  "summary": "",',
+    '  "priority": "low | medium | high | critical",',
+    '  "client_explanation": "",',
+    '  "technical_explanation": "",',
+    '  "recommended_fix": "",',
+    '  "example_copy": "",',
+    '  "confidence": 0.0',
+    '}',
+    'The "priority" must reflect the SEO impact of the ALREADY-DETECTED issue; do not invent new issues.',
+    '"confidence" is your confidence in the explanation, between 0.0 and 1.0.',
+  ].join('\n');
+}
+
+/**
+ * Serialise only the bounded context. Long fields are truncated defensively so
+ * we never ship the full crawl/HTML upstream even if a caller over-supplies.
+ */
+function renderContext(ctx: PageContext): string {
+  const clip = (v: unknown, max: number): string => {
+    const s = typeof v === 'string' ? v : v == null ? '' : JSON.stringify(v);
+    return s.length > max ? `${s.slice(0, max)}…` : s;
+  };
+  const lines: string[] = [];
+  if (ctx.url) lines.push(`URL: ${clip(ctx.url, 300)}`);
+  if (ctx.issueType) lines.push(`Issue type: ${clip(ctx.issueType, 120)}`);
+  if (ctx.currentTitle != null) lines.push(`Current title: ${clip(ctx.currentTitle, 300)}`);
+  if (ctx.currentMetaDescription != null)
+    lines.push(`Current meta description: ${clip(ctx.currentMetaDescription, 500)}`);
+  if (ctx.headingSummary) lines.push(`Heading outline (H1/H2): ${clip(ctx.headingSummary, 600)}`);
+  if (ctx.detectedIssue !== undefined)
+    lines.push(`Detected issue data: ${clip(ctx.detectedIssue, 1500)}`);
+  if (ctx.pageTextExcerpt) lines.push(`Page text excerpt: ${clip(ctx.pageTextExcerpt, 1500)}`);
+  return lines.join('\n');
+}
+
+/** Resolve a language hint into a clear instruction. Defaults to English. */
+function langLine(language?: string): string {
+  const lang = (language ?? '').trim();
+  return lang ? `Write all human-readable text in this language: ${lang}.` : 'Write in English.';
+}
+
+/**
+ * Shared runner: builds the prompt, calls NVIDIA, parses, and falls back safely.
+ */
+async function runStructured(promptBody: string): Promise<AiStructuredResponse> {
+  if (!isAiEnabled()) return fallbackResponse('AI provider not configured', false);
+
+  const raw = await callNvidiaChat(`${promptBody}\n${jsonInstruction()}`);
+  if (raw == null) return fallbackResponse('AI request failed or timed out', true);
+
+  const parsed = parseStructuredResponse(raw);
+  if (!parsed) return fallbackResponse('AI returned an unparseable response', true);
+  return parsed;
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+ * Public functions
+ * ──────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Explain an already-detected audit finding (technical + plain-language).
+ * The finding MUST come from the deterministic audit — AI only explains it.
+ */
+export function generateAuditExplanation(
+  auditFinding: unknown,
+  pageContext: PageContext,
+  language?: string,
+): Promise<AiStructuredResponse> {
+  const body = [
+    'An SEO audit has ALREADY detected the following issue for a page.',
+    'Explain this existing finding. Do not invent new issues.',
+    langLine(language),
+    '',
+    'Page context:',
+    renderContext(pageContext),
+    '',
+    `Detected finding: ${safeJson(auditFinding)}`,
+  ].join('\n');
+  return runStructured(body);
+}
+
+/**
+ * Turn an already-detected finding into a client-facing recommendation:
+ * a non-technical explanation plus a concrete recommended fix.
+ */
+export function generateClientRecommendation(
+  auditFinding: unknown,
+  pageContext: PageContext,
+  language?: string,
+): Promise<AiStructuredResponse> {
+  const body = [
+    'An SEO audit has ALREADY detected the following issue.',
+    'Produce a clear, non-technical recommendation a client can act on.',
+    'Focus client_explanation on business impact and recommended_fix on the action.',
+    'Do not invent new issues.',
+    langLine(language),
+    '',
+    'Page context:',
+    renderContext(pageContext),
+    '',
+    `Detected finding: ${safeJson(auditFinding)}`,
+  ].join('\n');
+  return runStructured(body);
+}
+
+/**
+ * Rewrite a meta title for an already-flagged page. Put the best new title in
+ * `example_copy`. AI is rewriting copy, not deciding the page has an issue.
+ */
+export function rewriteMetaTitle(
+  currentTitle: string,
+  pageContext: PageContext,
+  targetKeyword: string | undefined,
+  language?: string,
+): Promise<AiStructuredResponse> {
+  const body = [
+    'Rewrite the META TITLE for this page to be more effective for SEO.',
+    'Aim for roughly 50–60 characters. Keep it accurate to the page.',
+    'Return the single best new title in "example_copy". Do not invent page facts.',
+    targetKeyword ? `Target keyword to include naturally: ${targetKeyword}.` : '',
+    langLine(language),
+    '',
+    `Current title: ${currentTitle ?? ''}`,
+    '',
+    'Page context:',
+    renderContext(pageContext),
+  ]
+    .filter(Boolean)
+    .join('\n');
+  return runStructured(body);
+}
+
+/**
+ * Rewrite a meta description for an already-flagged page. Put the best new
+ * description in `example_copy`.
+ */
+export function rewriteMetaDescription(
+  currentDescription: string,
+  pageContext: PageContext,
+  targetKeyword: string | undefined,
+  language?: string,
+): Promise<AiStructuredResponse> {
+  const body = [
+    'Rewrite the META DESCRIPTION for this page to be more compelling and click-worthy.',
+    'Aim for roughly 140–160 characters. Keep it accurate to the page.',
+    'Return the single best new description in "example_copy". Do not invent page facts.',
+    targetKeyword ? `Target keyword to include naturally: ${targetKeyword}.` : '',
+    langLine(language),
+    '',
+    `Current meta description: ${currentDescription ?? ''}`,
+    '',
+    'Page context:',
+    renderContext(pageContext),
+  ]
+    .filter(Boolean)
+    .join('\n');
+  return runStructured(body);
+}
+
+/** JSON.stringify that never throws and stays bounded. */
+function safeJson(v: unknown): string {
+  try {
+    const s = JSON.stringify(v);
+    return s && s.length > 2000 ? `${s.slice(0, 2000)}…` : s ?? '';
+  } catch {
+    return String(v);
+  }
+}

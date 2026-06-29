@@ -3,6 +3,7 @@ import {
   CheckCircle, AlertTriangle, XCircle, ChevronDown, ChevronRight,
   Copy, Check, Shield, Map, Loader2, AlertCircle,
 } from 'lucide-react';
+import AiAssist from './AiAssist';
 
 /* ── Types ────────────────────────────────────────────────────── */
 
@@ -155,7 +156,8 @@ function ResultRow({ row }: { row: AuditResultRow }) {
               ))}
             </div>
           )}
-          <details className="bg-slate-900 rounded-lg overflow-hidden">
+          <AiAssist url={row.url} data={data} recommendations={row.recommendations} />
+          <details className="bg-slate-900 rounded-lg overflow-hidden mt-3">
             <summary className="px-3 py-2 text-white text-xs cursor-pointer hover:bg-slate-800">
               Raw data
             </summary>
