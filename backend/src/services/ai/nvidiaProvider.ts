@@ -22,8 +22,12 @@ const SYSTEM_PROMPT =
   'You are an expert SEO audit assistant. You explain existing SEO audit ' +
   'findings clearly. You do not invent issues.';
 
-/** Default request timeout. Keep short so a slow upstream never hangs the UI. */
-const DEFAULT_TIMEOUT_MS = 20_000;
+/**
+ * Default request timeout. Reasoning-capable models (e.g. Nemotron) can be slow
+ * even with thinking disabled, so give a generous bound while still capping it
+ * so a stuck upstream never hangs the UI forever.
+ */
+const DEFAULT_TIMEOUT_MS = 60_000;
 
 export type Priority = 'low' | 'medium' | 'high' | 'critical';
 
@@ -220,6 +224,11 @@ async function callNvidiaChat(
         messages,
         temperature: 0.3,
         max_tokens: 1200,
+        // These SEO helpers want a fast, clean answer — not chain-of-thought.
+        // Reasoning models (e.g. Nemotron) otherwise spend the token budget on
+        // hidden thinking, which is slow and can leave message.content empty.
+        // Ignored harmlessly by models that don't support the flag.
+        chat_template_kwargs: { enable_thinking: false },
       }),
       signal: controller.signal,
     });
