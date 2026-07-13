@@ -4,6 +4,7 @@ import {
   fingerprintIssue,
   normalizeUrlForFingerprint,
   normalizeMessageIdentity,
+  stableIssueCode,
 } from '../src/fingerprint.js';
 
 const issue = (over = {}) => ({
@@ -70,10 +71,40 @@ test('different areas or page types produce different fingerprints', () => {
   );
 });
 
-test('dynamic numbers in messages do not split the identity', () => {
-  const a = fingerprintIssue('p1', issue({ message: 'Redirect chain has 3 hops' }));
-  const b = fingerprintIssue('p1', issue({ message: 'Redirect chain has 5 hops' }));
-  assert.equal(a, b);
+test('HTTP 404 and HTTP 500 produce different fingerprints', () => {
+  const notFound = fingerprintIssue('p1', issue({ message: 'Page returned HTTP 404' }));
+  const serverError = fingerprintIssue('p1', issue({ message: 'Page returned HTTP 500' }));
+  assert.notEqual(notFound, serverError);
+});
+
+test('301 and 302 redirect issues produce different fingerprints', () => {
+  const permanent = fingerprintIssue('p1', issue({ area: 'canonical', message: 'Redirect uses 301' }));
+  const temporary = fingerprintIssue('p1', issue({ area: 'canonical', message: 'Redirect uses 302' }));
+  assert.notEqual(permanent, temporary);
+});
+
+test('different element counts do not silently collapse without a stable issue code', () => {
+  const one = fingerprintIssue('p1', issue({ message: '1 missing H1' }));
+  const two = fingerprintIssue('p1', issue({ message: '2 missing H1 elements' }));
+  assert.notEqual(one, two);
+});
+
+test('a shared stable issue code proves two wordings are the same issue type', () => {
+  const one = fingerprintIssue('p1', issue({ code: 'MISSING_H1', message: '1 missing H1' }));
+  const two = fingerprintIssue('p1', issue({ code: 'MISSING_H1', message: '2 missing H1 elements' }));
+  assert.equal(one, two, 'same code + same URL/area/pageType = same issue despite wording');
+});
+
+test('stable issue codes take priority over human-readable wording', () => {
+  // Same message, different codes → different issues.
+  const a = fingerprintIssue('p1', issue({ code: 'NOINDEX_PAGE', message: 'Indexing problem' }));
+  const b = fingerprintIssue('p1', issue({ code: 'BLOCKED_BY_ROBOTS', message: 'Indexing problem' }));
+  assert.notEqual(a, b);
+  // Code recognized from any supported field name, case-insensitively.
+  assert.equal(stableIssueCode({ code: ' Missing_H1 ' }), 'missing_h1');
+  assert.equal(stableIssueCode({ issueCode: 'X1' }), 'x1');
+  assert.equal(stableIssueCode({ checkId: 'c9' }), 'c9');
+  assert.equal(stableIssueCode({ message: 'no code here' }), null);
 });
 
 test('site-wide issues fingerprint separately from page issues', () => {
@@ -89,6 +120,8 @@ test('URL normalization details', () => {
   assert.equal(normalizeUrlForFingerprint(null), '');
 });
 
-test('message identity normalization', () => {
-  assert.equal(normalizeMessageIdentity('  HTTP  404  returned '), 'http # returned');
+test('message identity normalization preserves meaningful numbers', () => {
+  assert.equal(normalizeMessageIdentity('  HTTP  404  returned. '), 'http 404 returned');
+  assert.equal(normalizeMessageIdentity('Found “3” H1’s!!'), 'found "3" h1\'s');
+  assert.notEqual(normalizeMessageIdentity('HTTP 404'), normalizeMessageIdentity('HTTP 500'));
 });

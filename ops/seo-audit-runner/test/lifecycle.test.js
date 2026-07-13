@@ -159,14 +159,38 @@ test('timed-out audit does not resolve issues (no results payload)', async () =>
   db.close();
 });
 
-test('partial result (empty results array) does not replace a valid snapshot', async () => {
+test('malformed or ambiguous payloads do not replace a valid snapshot', async () => {
   const db = openStateDb(tmpDb());
   const store = new StateStore(db);
   apply(store, [issue()], 'r1');
-  const outcome = await pipelineWith(store, { status: 'COMPLETED', results: [] });
-  assert.equal(outcome.notificationStatus, 'skipped-partial-results');
+
+  const badPayloads = [
+    { results: [{ recommendations: [] }] },                                  // missing status
+    { status: 'RUNNING', results: [] },                                      // not terminal
+    { status: 'COMPLETED' },                                                 // missing collections
+    { status: 'COMPLETED', results: 'nope' },                                // malformed collection
+    { status: 'COMPLETED', results: [null] },                                // malformed row
+    { status: 'COMPLETED', results: [{ recommendations: '{truncated' }] },   // unparseable recs
+    { status: 'COMPLETED', results: [], error: 'Internal server error' },    // error payload
+  ];
+  for (const payload of badPayloads) {
+    const outcome = await pipelineWith(store, payload);
+    assert.equal(outcome.notificationStatus, 'skipped-partial-results', JSON.stringify(payload));
+  }
   assert.equal(store.getLatestSnapshot('p1').audit_run_id, 'r1');
   assert.equal(store.listActiveIssues('p1').length, 1);
+  db.close();
+});
+
+test('a clean COMPLETED audit (zero P0, empty results array) DOES resolve previous issues', async () => {
+  const db = openStateDb(tmpDb());
+  const store = new StateStore(db);
+  apply(store, [issue()], 'r1');
+  const outcome = await pipelineWith(store, { status: 'COMPLETED', results: [], siteRecommendations: [] });
+  assert.notEqual(outcome.notificationStatus, 'skipped-partial-results');
+  assert.deepEqual(outcome.lifecycleCounts, { new: 0, reopened: 0, unchanged: 0, resolved: 1, current: 0 });
+  assert.equal(store.listActiveIssues('p1').length, 0);
+  assert.equal(store.getLatestSnapshot('p1').audit_run_id, 'r-next');
   db.close();
 });
 

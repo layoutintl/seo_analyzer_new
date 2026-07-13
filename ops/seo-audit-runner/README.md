@@ -163,11 +163,15 @@ seo-audit-runner status --output json
 5. `POST /api/technical-analyzer/run` — **never retried automatically**;
    ambiguous failures are verified read-only → `TRIGGER_OUTCOME_UNKNOWN`.
 6. Poll until `COMPLETED` / `FAILED`, or `TIMED_OUT` after `POLL_TIMEOUT_MS`.
-7. **Phase 3, per COMPLETED audit:** fingerprint the current P0 issues,
-   diff against the previous successful snapshot, atomically store the new
-   snapshot + lifecycle transitions (new / unchanged / reopened / resolved),
-   and send the project notification per the alert mode. Failed / timed-out /
-   partial results never resolve issues and never replace a valid snapshot.
+7. **Phase 3, per COMPLETED audit:** validate the payload with an explicit
+   completeness check (`isCompleteAuditPayload`), fingerprint the current P0
+   issues, diff against the previous successful snapshot, atomically store
+   the new snapshot + lifecycle transitions (new / unchanged / reopened /
+   resolved), and send the project notification per the alert mode. A
+   structurally valid **clean** completed audit — zero P0 issues, even with
+   an empty results collection — resolves previously active issues. Failed,
+   timed-out, malformed, error, or ambiguous payloads never resolve issues
+   and never replace a valid snapshot.
 8. Optionally send one run-summary message (`SEO_RUNNER_SEND_RUN_SUMMARY`).
 9. Write the run journal and the automation-run record; print the report.
 
@@ -176,13 +180,18 @@ are reported separately and queued for `retry-notifications`.
 
 ### Issue lifecycle
 
-An issue's identity is a **SHA-256 fingerprint** over stable components:
-project ID, recommendation area, page type, page/site scope, normalized
-affected URL (lowercased host, no fragment/scheme/default ports, trailing
-slash normalized, path + query preserved), and a normalized message identity
-(whitespace collapsed, digit runs masked so dynamic counts don't split
-identities). Volatile data — audit run IDs, timestamps, ordering — never
-affects the fingerprint.
+An issue's identity is a **SHA-256 fingerprint (v2)** over stable
+components, in priority order: a stable application issue code when the
+payload carries one (`code`/`issueCode`/`checkId`/`ruleId` — it then replaces
+the message as the wording-independent identity), recommendation area,
+normalized affected URL (lowercased host, no fragment/scheme/default ports,
+trailing slash normalized, path + query preserved), page type and page/site
+scope, and — only when no stable code exists — a conservatively normalized
+message identity (lowercase, trim, whitespace collapsed, safe punctuation
+normalization). **Meaningful numbers are preserved**: HTTP 404 vs 500,
+redirect 301 vs 302, and heading/schema counts produce distinct identities.
+Volatile data — audit run IDs, timestamps, ordering — never affects the
+fingerprint.
 
 | State | Meaning |
 |---|---|
@@ -288,5 +297,11 @@ real audits are started and no real Slack messages are sent.
   a partial failure re-sends all parts on retry (parts already posted would
   repeat).
 - The lifecycle diff compares fingerprints, not text: if the application
-  reworded a recommendation substantially, the old fingerprint resolves and a
-  new one appears (reported as resolved + new).
+  reworded a recommendation substantially (and exposes no stable issue code),
+  the old fingerprint resolves and a new one appears (reported as
+  resolved + new). Likewise, a change in a meaningful number ("2 missing H1"
+  → "3 missing H1") is a new identity by design — numbers are part of the
+  issue's meaning.
+- Fingerprints are versioned (`v2` since Phase 3.1). The v2 change re-bases
+  identities once: on the first run after upgrading, previously tracked
+  issues resolve and reappear as new in a single transition.

@@ -36,6 +36,59 @@ export function shouldNotify(mode, counts) {
   return counts.current > 0 || changes > 0;
 }
 
+function isInterpretableRecommendations(value) {
+  if (value == null) return true; // stored as NULL when a row has no recommendations
+  if (Array.isArray(value)) return true;
+  if (typeof value === 'string') {
+    try {
+      return Array.isArray(JSON.parse(value));
+    } catch {
+      return false; // truncated / partially parsed JSON — ambiguous
+    }
+  }
+  return false;
+}
+
+/**
+ * Explicit completed-payload validation for GET /api/audit-runs/:id/results.
+ *
+ * A payload is complete when:
+ *  - it is a structurally valid response object (not an error payload)
+ *  - status is exactly 'COMPLETED'
+ *  - the `results` collection is present as an array — an EMPTY array is
+ *    valid: a clean completed audit with zero P0 issues must be able to
+ *    resolve previously active issues ("at least one result exists" is NOT
+ *    used as proof of completeness)
+ *  - every page row and `siteRecommendations` can be safely interpreted
+ *  - the payload's run ID matches the expected audit run, where available
+ *
+ * FAILED / RUNNING / missing-status / malformed / error / ambiguous payloads
+ * are all incomplete — they never resolve issues and never replace a valid
+ * previous snapshot.
+ */
+export function isCompleteAuditPayload(payload, { expectedAuditRunId = null } = {}) {
+  if (payload == null || typeof payload !== 'object' || Array.isArray(payload)) return false;
+  if (payload.error != null) return false; // API error payload
+  if (payload.status !== 'COMPLETED') return false; // FAILED / RUNNING / PENDING / missing
+  if (!Array.isArray(payload.results)) return false; // collection must exist (may be empty)
+
+  for (const row of payload.results) {
+    if (row == null || typeof row !== 'object' || Array.isArray(row)) return false;
+    if (!isInterpretableRecommendations(row.recommendations)) return false;
+  }
+  if (!isInterpretableRecommendations(payload.siteRecommendations)) return false;
+
+  // The API includes the run id in the response; verify it where available.
+  if (
+    expectedAuditRunId != null &&
+    payload.id != null &&
+    String(payload.id) !== String(expectedAuditRunId)
+  ) {
+    return false;
+  }
+  return true;
+}
+
 function retryDelayMs(attemptCount) {
   return Math.min(6 * 3_600_000, 60_000 * 2 ** Math.max(0, attemptCount - 1));
 }
@@ -120,10 +173,12 @@ export function createNotificationPipeline({
      * notification when the alert mode requires it.
      */
     async handleProjectCompleted({ project, auditRunId, results, criticalIssues }) {
-      // Guard: only a complete COMPLETED result may update lifecycle state.
-      if (results?.status !== 'COMPLETED' || !Array.isArray(results?.results) || results.results.length === 0) {
+      // Guard: only a structurally complete COMPLETED payload may update
+      // lifecycle state. A clean audit with ZERO current P0 issues (and even
+      // zero page rows) is complete and MUST resolve previously active issues.
+      if (!isCompleteAuditPayload(results, { expectedAuditRunId: auditRunId })) {
         logger?.warn?.(
-          `Project ${project.id}: result payload is incomplete — snapshot and issue state NOT updated`,
+          `Project ${project.id}: result payload is incomplete or invalid — snapshot and issue state NOT updated`,
         );
         return { notificationStatus: 'skipped-partial-results' };
       }
