@@ -5,15 +5,20 @@ Standalone Linux automation command for the SEO analyzer application.
 It discovers all projects, deduplicates domains, triggers a fresh SEO audit
 per project **through the application's own supported HTTP API**, waits for
 completion, extracts the issues the application classifies as critical
-(`recommendation.priority === 'P0'`), and optionally sends a Slack digest.
+(`recommendation.priority === 'P0'`), tracks their lifecycle
+(new / reopened / unchanged / resolved) in a runner-owned SQLite database,
+and sends Slack notifications with persistent retry.
 
 **Isolation guarantees**
 
 - Lives entirely in `ops/seo-audit-runner/`. No file of the main application
   is imported or modified.
-- Pure HTTP API client — no database driver, no direct DB reads or writes.
+- Pure HTTP API client toward the SEO app — **no access to the application's
+  PostgreSQL database, ever**. The runner's own state lives in a separate
+  SQLite file it fully owns.
 - Audits are started through the exact same endpoint the frontend uses.
-- Zero production npm dependencies (Node 20 built-ins + native `fetch`).
+- Zero production npm dependencies (Node built-ins, native `fetch`, and the
+  built-in `node:sqlite` module).
 
 Endpoints used (the complete set):
 
@@ -27,7 +32,8 @@ Endpoints used (the complete set):
 
 ## Installation
 
-Requires Node.js >= 20.10 (same major version the main app uses).
+Requires **Node.js ≥ 22.5** (Node 24 recommended — `node:sqlite` is built in;
+on Node 22.5–23.3 add the `--experimental-sqlite` flag).
 
 ```bash
 cd ops/seo-audit-runner
@@ -35,11 +41,7 @@ npm install          # no production dependencies; completes instantly
 npm link             # optional: puts `seo-audit-runner` on your PATH
 ```
 
-Without `npm link`, invoke it directly:
-
-```bash
-node bin/seo-audit-runner.js --help
-```
+Without `npm link`, invoke it directly: `node bin/seo-audit-runner.js --help`
 
 ## Configuration
 
@@ -49,7 +51,7 @@ cp .env.example .env
 "${EDITOR:-nano}" .env
 ```
 
-All settings (defaults shown):
+All settings (defaults shown; see `.env.example` for full documentation):
 
 ```env
 SEO_API_BASE_URL=http://localhost:3000
@@ -57,10 +59,22 @@ RUNNER_CONCURRENCY=1
 POLL_INTERVAL_MS=5000
 POLL_TIMEOUT_MS=900000
 HTTP_REQUEST_TIMEOUT_MS=30000
-RUNNER_STATE_DIR=/var/lib/seo-audit-runner   # default when unset: <runner>/state
+RUNNER_STATE_DIR=/var/lib/seo-audit-runner          # default: <runner>/state
+RUNNER_STATE_DB_PATH=/var/lib/seo-audit-runner/runner-state.sqlite
 RUNNER_LOG_LEVEL=info
+
 NOTIFICATIONS_ENABLED=false
-# SLACK_WEBHOOK_URL=...   required only when NOTIFICATIONS_ENABLED=true
+SEO_RUNNER_ALERT_MODE=new_or_regressed
+SEO_RUNNER_SEND_RUN_SUMMARY=true
+
+SLACK_BOT_TOKEN=
+SLACK_CHANNEL_ID=
+SLACK_WEBHOOK_URL=
+
+SLACK_REQUEST_TIMEOUT_MS=15000
+SLACK_MAX_RETRIES=4
+SLACK_MAX_ISSUES_PER_MESSAGE=20
+SLACK_MAX_MESSAGE_CHARACTERS=30000
 ```
 
 Environment variables always win over `.env` values. A different env file can
@@ -72,134 +86,182 @@ The application API has **no authentication** (by design of the current app —
 the runner does not invent a token header). Therefore:
 
 - `SEO_API_BASE_URL` must point to a **trusted private endpoint**: localhost,
-  a Docker network hostname, or a VPN/internal address.
-- Plain-`http` URLs to public hosts are **rejected** at config validation.
-  For development only, `ALLOW_INSECURE_PUBLIC_API=true` overrides this.
-- URLs containing credentials are never logged (credentials are masked), and
-  the Slack webhook URL is registered as a secret and redacted from all logs.
+  a Docker network hostname, or a VPN/internal address. Plain-`http` URLs to
+  public hosts are rejected (dev override: `ALLOW_INSECURE_PUBLIC_API=true`).
+- **Secret handling:** the Slack bot token, webhook URL, and Authorization
+  headers are never logged (registered as redaction secrets), never stored in
+  SQLite, and never printed by `validate-config`. Keep `.env` readable only
+  by the runner's user (`chmod 600 .env`).
+
+## Slack setup
+
+### Preferred: bot token (`chat.postMessage`)
+
+1. Create a Slack app for your workspace (api.slack.com → *Create New App*).
+2. Add the **`chat:write`** bot scope and install the app to the workspace.
+3. Copy the **Bot User OAuth Token** (`xoxb-…`) → `SLACK_BOT_TOKEN`.
+4. Use the **channel ID** (e.g. `C0123456789`, from the channel's details
+   page), NOT the channel name → `SLACK_CHANNEL_ID`.
+5. For private channels, **invite the bot** to the channel
+   (`/invite @your-bot`), otherwise Slack returns `not_in_channel`.
+
+### Fallback: incoming webhook
+
+Set `SLACK_WEBHOOK_URL` only. Selection order: bot token + channel ID first;
+webhook as fallback; with neither configured, notification delivery is
+impossible (and `NOTIFICATIONS_ENABLED=true` fails validation unless
+`SEO_RUNNER_ALERT_MODE=disabled`). A **partial** bot configuration (token
+without channel ID or vice versa) is always a configuration error.
+
+### Alert modes (`SEO_RUNNER_ALERT_MODE`)
+
+| Mode | Behavior |
+|---|---|
+| `new_or_regressed` *(default)* | Notify only when a completed audit has **new**, **reopened**, or **resolved** P0 issues. Unchanged issues never re-alert. |
+| `all_current` | List all current P0 issues after each completed audit, plus new/reopened/unchanged/resolved counts. |
+| `summary_only` | Project-level counts only, no individual issues. |
+| `disabled` | Never send Slack messages — issue lifecycle state is still updated after successful audits. |
+
+Messages are split safely for Slack: at most `SLACK_MAX_ISSUES_PER_MESSAGE`
+issues and `SLACK_MAX_MESSAGE_CHARACTERS` characters per message, project
+context repeated in every part, a single issue never split across messages,
+truncation with an explicit remaining count, mrkdwn escaping, blocks plus a
+plain-text fallback.
 
 ## Usage
 
 ```bash
-seo-audit-runner validate-config          # check config + state dir (offline)
+seo-audit-runner validate-config          # config + state dir + state DB (offline)
 seo-audit-runner list-projects            # read-only listing with dedupe preview
 seo-audit-runner run --all                # audit every deduplicated project
 seo-audit-runner run --project PROJECT_ID # audit one project
-seo-audit-runner run --all --dry-run      # plan only — no POST, no writes, no notifications
+seo-audit-runner run --all --dry-run      # plan only — no POST, no state, no Slack
 seo-audit-runner run --all --max-concurrency 1
 seo-audit-runner run --all --no-notifications
 seo-audit-runner run --all --fail-on-critical
+
+seo-audit-runner retry-notifications                 # retry queued/failed Slack messages
+seo-audit-runner retry-notifications --limit 50
+seo-audit-runner retry-notifications --project PROJECT_ID
+seo-audit-runner retry-notifications --dry-run       # list eligible, send nothing
+
+seo-audit-runner status                   # runner-owned state report
+seo-audit-runner status --output json
 ```
 
 ### What a run does
 
 1. `GET /api/projects` — discover all projects.
-2. Normalize domains **for comparison only** (lowercase; strip scheme,
-   credentials, path, query, fragment, trailing dot; ignore ports 80/443;
-   keep other ports; strip one leading `www.`; other subdomains stay
-   distinct). Original IDs and URLs are never replaced.
-3. Deduplicate: one project per normalized domain. Winner selection order:
-   usable `last_form_values` → most recent `last_audit_at` → most recent
-   `updated_at` → `completed_count > 0` → lowest project ID. Losers are
-   reported as `deduplicated: covered by <winner-project-id>`; nothing is
-   deleted or modified.
-4. Build the audit request from `last_form_values`
-   (`sectionUrl→section`, `tagUrl→tag`, `searchUrl→search`,
-   `authorUrl→author`, `videoArticleUrl→video_article`); if `homeUrl` or
-   `articleUrl` is missing, fall back read-only to the latest completed
-   audit's page types. If no valid pair exists →
-   `SKIPPED_MISSING_AUDIT_CONFIG` (never guessed or crawled).
-5. Pre-flight `GET /api/projects/:id`: if `running_count > 0` →
-   `SKIPPED_ALREADY_RUNNING` (the app's audit endpoint replaces the site's
-   `seed_urls`, so overlapping same-site runs are unsafe).
-6. `POST /api/technical-analyzer/run` → `{ siteId, auditRunId }` (both are
-   stored in the run report). **This POST is never retried automatically**:
-   after an ambiguous failure (timeout / reset / lost response) the runner
-   only re-checks read-only endpoints and reports
-   `TRIGGER_OUTCOME_UNKNOWN`.
-7. Poll `GET /api/audit-runs/:auditRunId/results` with jittered, abortable
-   requests until `COMPLETED` or `FAILED`, or report `TIMED_OUT` after
-   `POLL_TIMEOUT_MS` (the application's audit status is never touched).
-8. Extract critical issues: exactly `priority === 'P0'` from page
-   `recommendations` and top-level `siteRecommendations`. Page status
-   (`PASS`/`WARN`/`FAIL`) is not a severity signal; P1/P2 are never promoted.
-9. Write the run journal to `RUNNER_STATE_DIR` (`last-run.json` +
-   `run-<timestamp>.json`), send the optional Slack digest, print the report.
+2. Normalize domains **for comparison only**; deduplicate (winner order:
+   usable `last_form_values` → newest `last_audit_at` → newest `updated_at`
+   → `completed_count > 0` → lowest ID). Losers are reported as
+   `deduplicated: covered by <winner-project-id>`; nothing is modified.
+3. Build the audit request from `last_form_values` (fallback: latest
+   completed audit's page types). No usable pair →
+   `SKIPPED_MISSING_AUDIT_CONFIG`.
+4. Pre-flight `running_count` check → `SKIPPED_ALREADY_RUNNING` when > 0.
+5. `POST /api/technical-analyzer/run` — **never retried automatically**;
+   ambiguous failures are verified read-only → `TRIGGER_OUTCOME_UNKNOWN`.
+6. Poll until `COMPLETED` / `FAILED`, or `TIMED_OUT` after `POLL_TIMEOUT_MS`.
+7. **Phase 3, per COMPLETED audit:** fingerprint the current P0 issues,
+   diff against the previous successful snapshot, atomically store the new
+   snapshot + lifecycle transitions (new / unchanged / reopened / resolved),
+   and send the project notification per the alert mode. Failed / timed-out /
+   partial results never resolve issues and never replace a valid snapshot.
+8. Optionally send one run-summary message (`SEO_RUNNER_SEND_RUN_SUMMARY`).
+9. Write the run journal and the automation-run record; print the report.
 
-### Concurrency & locking
+Notification failures never change audit results or audit exit codes — they
+are reported separately and queued for `retry-notifications`.
 
-- `RUNNER_CONCURRENCY` (default **1**) bounds parallel audits across
-  *different* sites; the same normalized domain never runs twice in one
-  execution.
-- A process lock file in `RUNNER_STATE_DIR` prevents two runner processes
-  from executing simultaneously (exit code 4). The lock is released on
-  success, error, `SIGINT`, and `SIGTERM`; a lock left by a dead process is
-  reclaimed automatically. Note: the lock is also taken for `--dry-run`.
+### Issue lifecycle
+
+An issue's identity is a **SHA-256 fingerprint** over stable components:
+project ID, recommendation area, page type, page/site scope, normalized
+affected URL (lowercased host, no fragment/scheme/default ports, trailing
+slash normalized, path + query preserved), and a normalized message identity
+(whitespace collapsed, digit runs masked so dynamic counts don't split
+identities). Volatile data — audit run IDs, timestamps, ordering — never
+affects the fingerprint.
+
+| State | Meaning |
+|---|---|
+| `NEW` | fingerprint never seen for this project |
+| `UNCHANGED` | fingerprint was active in the previous successful snapshot |
+| `REOPENED` | fingerprint was resolved and appeared again |
+| `RESOLVED` | fingerprint was active but is absent from the new successful snapshot |
+
+### State database
+
+Runner-owned SQLite at `RUNNER_STATE_DB_PATH` (default
+`<RUNNER_STATE_DIR>/runner-state.sqlite`), created and migrated
+automatically. Tables: `automation_runs`, `project_snapshots`,
+`issue_states`, `notifications`, `schema_migrations`. Migrations are
+versioned, idempotent, and transactional; before a schema upgrade the file is
+backed up to `<db>.backup-v<N>`.
+
+**Backup:** copy the `.sqlite` file while no runner instance is active (the
+process lock guarantees exclusivity), e.g. nightly
+`cp runner-state.sqlite /backup/`. **Recovery from corruption:** stop the
+runner, restore the latest backup (or delete the file — it will be
+recreated). Deleting the file loses lifecycle history, so the next audit
+reports every current P0 as `NEW` once; the SEO application itself is
+completely unaffected. Slack secrets are never stored in this database.
+
+### Idempotency (honest limitation)
+
+Every notification has a deterministic identity (SHA-256 of project ID,
+audit run ID, type, alert mode, and the sorted lifecycle fingerprint sets).
+The identity row is persisted *before* sending, and delivered notifications
+are never re-sent. However, if the process dies **after Slack accepted the
+request but before the local DELIVERED mark**, a later `retry-notifications`
+can duplicate that message — Slack's API offers no client-supplied dedup key,
+so exactly-once delivery is impossible; the runner provides best-effort
+idempotency and always checks local delivery state before retrying.
 
 ### Retry policy
 
-- GET requests: exponential backoff with jitter on network failures and
-  HTTP 429/500/502/503/504 (max 3 retries). Other 4xx are never retried.
-- The audit-trigger POST: exactly one attempt, ever (see step 6).
+- SEO-app GETs: exponential backoff + jitter on network errors and
+  429/500/502/503/504 (max 3 retries); other 4xx never retried.
+- Audit-trigger POST: exactly one attempt, ever.
+- Slack: per-send retries with backoff + jitter up to `SLACK_MAX_RETRIES`,
+  `Retry-After` honored on 429, 5xx retryable. Permanent errors
+  (`invalid_auth`, `channel_not_found`, `not_in_channel`, `token_revoked`,
+  `msg_too_long`, invalid payload, …) are never retried and are marked
+  `PERMANENT_FAILURE`. Transient failures are stored with a growing
+  `next_retry_at` and picked up by `retry-notifications`.
+
+### Concurrency & locking
+
+`RUNNER_CONCURRENCY` (default **1**) bounds parallel audits across different
+sites; the same normalized domain never runs twice in one execution. A
+process lock file in `RUNNER_STATE_DIR` prevents concurrent runner processes
+(exit code 4) — `run` and `retry-notifications` both take it; the lock is
+released on success, error, `SIGINT`, and `SIGTERM`, and stale locks are
+reclaimed.
 
 ### Exit codes
 
 | Code | Meaning |
 |---|---|
-| 0 | completed successfully |
+| 0 | command completed successfully |
 | 1 | configuration or runner-level failure (including aborted runs) |
 | 2 | one or more audits `FAILED`, `TIMED_OUT`, `TRIGGER_FAILED`, or `TRIGGER_OUTCOME_UNKNOWN` |
 | 3 | critical issues found and `--fail-on-critical` enabled |
 | 4 | another runner instance is already active |
 
-Precedence when several conditions occur: **4 > 1 > 3 > 2 > 0**.
-(4 and 1 are decided at startup / on runner failure; among run results,
-`--fail-on-critical` outranks audit failures because it is the explicitly
-requested signal.)
-
-### Notifications (Phase 2)
-
-Disabled by default (`NOTIFICATIONS_ENABLED=false`). When enabled with a
-`SLACK_WEBHOOK_URL`, a single digest message per run is posted: counts,
-per-project P0 lists, and projects needing attention. `--no-notifications`
-and `--dry-run` force-disable them for a run.
-Alert history, issue fingerprinting, reopened/resolved detection, and
-persistent dedup are Phase 3 (the notifier interface in `src/notifier.js` is
-the extension point).
+Precedence: **4 > 1 > 3 > 2 > 0**. Slack notification failures do **not**
+affect these codes — they appear in the report and the retry queue.
 
 ## Scheduling on Linux
 
-Cron (every day at 06:00):
-
 ```cron
 0 6 * * * cd /opt/seo-analyzer/ops/seo-audit-runner && /usr/bin/node bin/seo-audit-runner.js run --all >> /var/log/seo-audit-runner.log 2>&1
+15 * * * * cd /opt/seo-analyzer/ops/seo-audit-runner && /usr/bin/node bin/seo-audit-runner.js retry-notifications >> /var/log/seo-audit-runner.log 2>&1
 ```
 
-systemd timer:
-
-```ini
-# /etc/systemd/system/seo-audit-runner.service
-[Unit]
-Description=SEO audit runner
-After=network-online.target
-
-[Service]
-Type=oneshot
-WorkingDirectory=/opt/seo-analyzer/ops/seo-audit-runner
-ExecStart=/usr/bin/node bin/seo-audit-runner.js run --all
-Environment=RUNNER_STATE_DIR=/var/lib/seo-audit-runner
-
-# /etc/systemd/system/seo-audit-runner.timer
-[Unit]
-Description=Daily SEO audits
-
-[Timer]
-OnCalendar=*-*-* 06:00:00
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-```
+(systemd service/timer equivalents work identically — `Type=oneshot`,
+`WorkingDirectory=` the runner dir, `ExecStart=` the same command.)
 
 ## Tests
 
@@ -208,18 +270,23 @@ cd ops/seo-audit-runner
 npm test
 ```
 
-All HTTP requests in tests are mocked — no real audits are ever started.
+All HTTP requests are mocked and all SQLite databases are temporary — no
+real audits are started and no real Slack messages are sent.
 
 ## Assumptions & limitations
 
-- The application must run in **DB mode** (`DATABASE_URL` set). In in-memory
-  mode the trigger endpoint returns results synchronously and nothing can be
-  polled; the runner reports this as a clear `TRIGGER_FAILED`.
-- `running_count` is a best-effort guard: the app itself has no server-side
-  lock, so a race with a human clicking "run" in the UI at the same second is
-  still possible. The runner minimizes the window by checking immediately
-  before triggering.
-- After `TRIGGER_OUTCOME_UNKNOWN` the runner intentionally does nothing
-  further for that project; re-run later once `running_count` is 0 again.
+- The application must run in **DB mode** (`DATABASE_URL` set); in-memory
+  mode cannot be polled and is reported as `TRIGGER_FAILED`.
+- `running_count` is a best-effort guard; the app has no server-side lock.
 - `TIMED_OUT` means the runner stopped waiting — the audit may still finish
-  server-side; the application status is never modified.
+  server-side; the application status is never modified, and the timed-out
+  run never updates issue lifecycle state.
+- Best-effort Slack idempotency (see above) — a crash in the narrow window
+  between Slack acceptance and the local DELIVERED mark can duplicate one
+  message on retry.
+- Multi-part notifications are marked delivered only when **all** parts send;
+  a partial failure re-sends all parts on retry (parts already posted would
+  repeat).
+- The lifecycle diff compares fingerprints, not text: if the application
+  reworded a recommendation substantially, the old fingerprint resolves and a
+  new one appears (reported as resolved + new).

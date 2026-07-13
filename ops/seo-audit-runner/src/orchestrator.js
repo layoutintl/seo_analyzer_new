@@ -48,6 +48,9 @@ export async function runAudits({ config, apiClient, logger = null, options = {}
     startedAt: new Date().toISOString(),
     finishedAt: null,
     aborted: false,
+    discoveredProjects: 0,
+    selectedProjects: 0,
+    notificationFailures: 0,
     entries: [],
     criticalIssues: [],
   };
@@ -61,9 +64,11 @@ export async function runAudits({ config, apiClient, logger = null, options = {}
     }
   }
   logger?.info?.(`Discovered ${projects.length} project(s)`);
+  report.discoveredProjects = projects.length;
 
   // ── Deduplicate ───────────────────────────────────────────────
   const { winners, duplicates } = dedupeProjects(projects);
+  report.selectedProjects = winners.length;
   for (const dup of duplicates) {
     report.entries.push(
       makeEntry(dup.project, OUTCOME.DEDUPLICATED, `deduplicated: covered by ${dup.winnerId}`),
@@ -163,14 +168,44 @@ export async function runAudits({ config, apiClient, logger = null, options = {}
       });
       report.criticalIssues.push(...criticals);
       logger?.info?.(`Project ${label}: COMPLETED with ${criticals.length} critical (P0) issue(s)`);
-      report.entries.push(
-        makeEntry(project, OUTCOME.COMPLETED, `critical (P0) issues: ${criticals.length}`, {
+      const completedEntry = makeEntry(
+        project,
+        OUTCOME.COMPLETED,
+        `critical (P0) issues: ${criticals.length}`,
+        {
           siteId: trigger.siteId,
           auditRunId: trigger.auditRunId,
           requestSource: built.source,
           criticalCount: criticals.length,
-        }),
+        },
       );
+      report.entries.push(completedEntry);
+
+      // Phase 3 hook: issue lifecycle + notification dispatch. A failure
+      // here NEVER converts a successful audit into a failed one — it is
+      // recorded separately on the entry and in report.notificationFailures.
+      if (typeof options.onProjectCompleted === 'function') {
+        try {
+          const outcome = await options.onProjectCompleted({
+            project,
+            siteId: trigger.siteId,
+            auditRunId: trigger.auditRunId,
+            results: polled.results,
+            criticalIssues: criticals,
+          });
+          if (outcome?.lifecycleCounts) completedEntry.lifecycle = outcome.lifecycleCounts;
+          if (outcome?.notificationStatus) completedEntry.notification = outcome.notificationStatus;
+          if (['failed-will-retry', 'permanent-failure'].includes(outcome?.notificationStatus)) {
+            report.notificationFailures++;
+          }
+        } catch (err) {
+          logger?.warn?.(
+            `Project ${label}: post-audit state/notification step failed (audit result unaffected): ${err.message}`,
+          );
+          completedEntry.notification = `failed: ${err.message}`;
+          report.notificationFailures++;
+        }
+      }
     } else {
       logger?.warn?.(`Project ${label}: ${polled.outcome}${polled.detail ? ` — ${polled.detail}` : ''}`);
       report.entries.push(

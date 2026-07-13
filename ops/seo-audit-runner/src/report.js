@@ -55,6 +55,7 @@ export function summarize(report) {
       (counts[OUTCOME.SKIPPED_ALREADY_RUNNING] ?? 0),
     failures: [...FAILURE_OUTCOMES].reduce((sum, o) => sum + (counts[o] ?? 0), 0),
     criticalIssues: (report?.criticalIssues ?? []).length,
+    notificationFailures: report?.notificationFailures ?? 0,
     counts,
   };
 }
@@ -83,6 +84,9 @@ export function formatTextReport(report) {
       ` | skipped: ${s.skipped} | deduplicated: ${s.deduplicated} | failures: ${s.failures}`,
   );
   lines.push(` Critical (P0) issues: ${s.criticalIssues}`);
+  if (s.notificationFailures > 0) {
+    lines.push(` Notification failures: ${s.notificationFailures} (queued — see \`seo-audit-runner retry-notifications\`)`);
+  }
   lines.push('');
 
   for (const entry of report.entries ?? []) {
@@ -90,9 +94,13 @@ export function formatTextReport(report) {
     const run = entry.auditRunId ? ` auditRunId=${entry.auditRunId}` : '';
     const site = entry.siteId ? ` siteId=${entry.siteId}` : '';
     const crit = entry.outcome === OUTCOME.COMPLETED ? ` critical=${entry.criticalCount}` : '';
+    const lc = entry.lifecycle
+      ? ` [new=${entry.lifecycle.new} reopened=${entry.lifecycle.reopened} unchanged=${entry.lifecycle.unchanged} resolved=${entry.lifecycle.resolved}]`
+      : '';
+    const notif = entry.notification ? ` notification=${entry.notification}` : '';
     lines.push(
       ` [${entry.outcome}] ${entry.projectId ?? '?'}${name} (${entry.domain ?? 'no-domain'})` +
-        `${site}${run}${crit}${entry.detail ? ` — ${entry.detail}` : ''}`,
+        `${site}${run}${crit}${lc}${notif}${entry.detail ? ` — ${entry.detail}` : ''}`,
     );
   }
 
