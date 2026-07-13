@@ -1,0 +1,155 @@
+/**
+ * Runner-owned SQLite state database (built-in node:sqlite — no dependency,
+ * no connection to the SEO application's PostgreSQL database).
+ *
+ * Schema management:
+ *  - versioned migrations recorded in `schema_migrations`
+ *  - each migration runs inside a transaction (interrupted migrations roll
+ *    back — prior state is never corrupted)
+ *  - migrations are idempotent (version-gated; re-running is a no-op)
+ *  - before upgrading an existing non-empty database, a file backup
+ *    `<db>.backup-v<currentVersion>` is created when practical
+ *  - previous runner state is never deleted during upgrades
+ *
+ * Secrets policy: Slack tokens, webhook URLs, and authorization headers are
+ * NEVER stored in this database — only message payloads and metadata.
+ */
+
+import { DatabaseSync } from 'node:sqlite';
+import fs from 'node:fs';
+import path from 'node:path';
+
+export const MIGRATIONS = [
+  {
+    version: 1,
+    name: 'initial-phase3-schema',
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS automation_runs (
+          id                      TEXT PRIMARY KEY,
+          started_at              TEXT NOT NULL,
+          completed_at            TEXT,
+          final_status            TEXT,
+          total_projects          INTEGER NOT NULL DEFAULT 0,
+          successful_audits       INTEGER NOT NULL DEFAULT 0,
+          failed_audits           INTEGER NOT NULL DEFAULT 0,
+          timed_out_audits        INTEGER NOT NULL DEFAULT 0,
+          deduplicated_projects   INTEGER NOT NULL DEFAULT 0,
+          projects_with_critical  INTEGER NOT NULL DEFAULT 0,
+          notification_status     TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS project_snapshots (
+          id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_id         TEXT NOT NULL,
+          normalized_domain  TEXT,
+          audit_run_id       TEXT NOT NULL,
+          audit_completed_at TEXT,
+          snapshot_status    TEXT NOT NULL,
+          p0_count           INTEGER NOT NULL,
+          created_at         TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_snapshots_project
+          ON project_snapshots (project_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS issue_states (
+          project_id        TEXT NOT NULL,
+          fingerprint       TEXT NOT NULL,
+          area              TEXT,
+          normalized_url    TEXT,
+          message           TEXT,
+          fix_hint          TEXT,
+          page_type         TEXT,
+          first_seen_at     TEXT NOT NULL,
+          last_seen_at      TEXT NOT NULL,
+          last_audit_run_id TEXT,
+          state             TEXT NOT NULL CHECK (state IN ('ACTIVE', 'RESOLVED')),
+          resolved_at       TEXT,
+          reopened_count    INTEGER NOT NULL DEFAULT 0,
+          last_alerted_at   TEXT,
+          PRIMARY KEY (project_id, fingerprint)
+        );
+        CREATE INDEX IF NOT EXISTS idx_issue_states_project_state
+          ON issue_states (project_id, state);
+
+        CREATE TABLE IF NOT EXISTS notifications (
+          id                  TEXT PRIMARY KEY,
+          runner_execution_id TEXT,
+          project_id          TEXT,
+          audit_run_id        TEXT,
+          type                TEXT NOT NULL,
+          method              TEXT,
+          payload_hash        TEXT NOT NULL,
+          payload_json        TEXT NOT NULL,
+          attempt_count       INTEGER NOT NULL DEFAULT 0,
+          status              TEXT NOT NULL CHECK
+            (status IN ('PENDING', 'DELIVERED', 'FAILED', 'PERMANENT_FAILURE')),
+          last_error          TEXT,
+          created_at          TEXT NOT NULL,
+          delivered_at        TEXT,
+          next_retry_at       TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_notifications_status
+          ON notifications (status, next_retry_at);
+      `);
+    },
+  },
+];
+
+export function migrate(db, { dbPath = null, logger = null } = {}) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      version    INTEGER PRIMARY KEY,
+      name       TEXT NOT NULL,
+      applied_at TEXT NOT NULL
+    );
+  `);
+
+  const row = db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get();
+  const current = row?.v ?? 0;
+  const pending = MIGRATIONS.filter((m) => m.version > current);
+  if (pending.length === 0) return current;
+
+  // Safety backup before upgrading an existing, already-versioned database.
+  if (current > 0 && dbPath && dbPath !== ':memory:' && fs.existsSync(dbPath)) {
+    const backupPath = `${dbPath}.backup-v${current}`;
+    try {
+      db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+      if (!fs.existsSync(backupPath)) {
+        fs.copyFileSync(dbPath, backupPath);
+        logger?.info?.(`State DB backup created before migration: ${backupPath}`);
+      }
+    } catch (err) {
+      logger?.warn?.(`Could not create state DB backup (continuing): ${err.message}`);
+    }
+  }
+
+  for (const migration of pending) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      migration.up(db);
+      db.prepare('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)')
+        .run(migration.version, migration.name, new Date().toISOString());
+      db.exec('COMMIT');
+      logger?.info?.(`State DB migrated to v${migration.version} (${migration.name})`);
+    } catch (err) {
+      try { db.exec('ROLLBACK'); } catch { /* nothing to roll back */ }
+      throw new Error(
+        `state DB migration v${migration.version} (${migration.name}) failed and was rolled back: ${err.message}`,
+      );
+    }
+  }
+  return MIGRATIONS.at(-1).version;
+}
+
+/** Open (creating if needed) and migrate the runner state database. */
+export function openStateDb(dbPath, { logger = null } = {}) {
+  if (dbPath !== ':memory:') {
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+  }
+  const db = new DatabaseSync(dbPath);
+  db.exec('PRAGMA journal_mode = WAL;');
+  db.exec('PRAGMA foreign_keys = ON;');
+  migrate(db, { dbPath, logger });
+  return db;
+}

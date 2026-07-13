@@ -1,14 +1,14 @@
 {
   "name": "seo-audit-runner",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Standalone SEO audit automation runner. Pure HTTP API client for the SEO analyzer application — no database access, no main-app imports.",
+  "description": "Standalone SEO audit automation runner. Pure HTTP API client for the SEO analyzer application — no access to the app's database, no main-app imports. Runner-owned state uses the built-in node:sqlite module.",
   "bin": {
     "seo-audit-runner": "bin/seo-audit-runner.js"
   },
   "engines": {
-    "node": ">=20.10"
+    "node": ">=22.5.0"
   },
   "scripts": {
     "start": "node bin/seo-audit-runner.js",
