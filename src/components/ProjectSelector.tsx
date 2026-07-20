@@ -14,7 +14,12 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
-import { FolderOpen, Plus, Pencil, Trash2, Check, X, ChevronDown } from 'lucide-react';
+import { FolderOpen, Plus, Pencil, Trash2, Check, X, ChevronDown, AlertCircle } from 'lucide-react';
+import {
+  describeCreateOutcome,
+  describeCreateError,
+  describeListError,
+} from './projectCreateMessages';
 
 export interface ProjectFormValues {
   homeUrl: string;
@@ -60,12 +65,15 @@ export default function ProjectSelector({
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(false);
   const [open, setOpen] = useState(false);
+  /** Non-empty when the project list could not be loaded — never conflated with "no projects" */
+  const [listError, setListError] = useState('');
 
   // Inline "new project" state
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
   const [newUrl, setNewUrl] = useState('');
   const [createError, setCreateError] = useState('');
+  const [createNotice, setCreateNotice] = useState('');
 
   // Inline "rename" state
   const [renaming, setRenaming] = useState(false);
@@ -78,14 +86,21 @@ export default function ProjectSelector({
 
   const fetchProjects = useCallback(async () => {
     setLoading(true);
+    setListError('');
     try {
       const res = await fetch(`${apiBase}/api/projects`);
-      if (res.ok) {
-        const data = await res.json() as { projects: Project[] };
-        setProjects(data.projects ?? []);
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({})) as { error?: string };
+        // A failed request is NOT "no projects yet" — say what actually happened.
+        setListError(describeListError(res.status, data.error));
+        setProjects([]);
+        return;
       }
+      const data = await res.json() as { projects: Project[] };
+      setProjects(data.projects ?? []);
     } catch {
-      // DB not available — stay hidden
+      setListError('Could not reach the server to load projects.');
+      setProjects([]);
     } finally {
       setLoading(false);
     }
@@ -99,6 +114,7 @@ export default function ProjectSelector({
 
   const handleCreate = async () => {
     setCreateError('');
+    setCreateNotice('');
     if (!newUrl.trim()) { setCreateError('Website URL is required'); return; }
     try {
       const res = await fetch(`${apiBase}/api/projects`, {
@@ -106,12 +122,19 @@ export default function ProjectSelector({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ project_name: newName.trim() || undefined, website_url: newUrl.trim() }),
       });
-      const data = await res.json() as { project?: Project; error?: string };
-      if (!res.ok) { setCreateError(data.error ?? 'Failed to create project'); return; }
+      let data: { project?: Project; created?: boolean; automation_ready?: boolean; error?: string };
+      try {
+        data = await res.json() as typeof data;
+      } catch {
+        setCreateError(`Unexpected response from the server (HTTP ${res.status})`);
+        return;
+      }
+      if (!res.ok) { setCreateError(describeCreateError(res.status, data.error)); return; }
       await fetchProjects();
       setCreating(false);
       setNewName('');
       setNewUrl('');
+      setCreateNotice(describeCreateOutcome(data).text);
       if (data.project) onSelect(data.project);
     } catch {
       setCreateError('Could not reach the server');
@@ -149,7 +172,21 @@ export default function ProjectSelector({
     } catch { /* ignore */ }
   };
 
-  // Don't render if DB is not available (no projects returned and not loading)
+  // The project list failed to load — surface it instead of pretending the
+  // list is simply empty.
+  if (!loading && listError) {
+    return (
+      <div className="flex items-center gap-2 text-xs text-red-500 mb-4">
+        <AlertCircle size={14} className="flex-shrink-0" />
+        <span>{listError}</span>
+        <button onClick={fetchProjects} className="text-blue-500 hover:underline flex-shrink-0">
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  // Genuinely empty list (the request succeeded and returned no projects).
   if (!loading && projects.length === 0 && !creating) {
     return (
       <div className="flex items-center gap-2 text-xs text-slate-400 mb-4">
@@ -217,6 +254,15 @@ export default function ProjectSelector({
     <div className="flex items-center gap-2 mb-4 flex-wrap">
       <FolderOpen size={15} className="text-slate-400 flex-shrink-0" />
       <span className="text-xs text-slate-500 flex-shrink-0">Project:</span>
+
+      {createNotice && (
+        <span className="w-full text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded px-2 py-1">
+          {createNotice}{' '}
+          <button onClick={() => setCreateNotice('')} className="underline opacity-70 hover:opacity-100">
+            Dismiss
+          </button>
+        </span>
+      )}
 
       {/* Project dropdown */}
       <div className="relative">
