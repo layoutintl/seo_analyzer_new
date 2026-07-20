@@ -7,7 +7,7 @@
  *
  * Endpoints:
  *   GET    /api/projects                          — list all projects
- *   POST   /api/projects                          — create / register project
+ *   POST   /api/projects                          — create (201) / update existing (200)
  *   GET    /api/projects/:id                      — single project + stats
  *   PATCH  /api/projects/:id                      — rename project
  *   DELETE /api/projects/:id                      — delete project (cascades)
@@ -19,6 +19,7 @@
 import { Router, Request, Response } from 'express';
 import { getDb } from '../lib/db.js';
 import { compareAudits, AuditSnapshot, AuditPage } from '../lib/compareAudits.js';
+import { parseCreateProjectBody, isAutomationReady } from '../lib/projectInput.js';
 
 export const projectsRouter = Router();
 
@@ -56,7 +57,11 @@ projectsRouter.get('/projects', async (_req: Request, res: Response) => {
       FROM sites s
       LEFT JOIN audit_runs ar ON ar.site_id = s.id
       GROUP BY s.id
-      ORDER BY s.last_audit_at DESC NULLS LAST, s.created_at DESC
+      ORDER BY GREATEST(
+                 COALESCE(s.last_audit_at, s.created_at::timestamptz),
+                 s.created_at::timestamptz
+               ) DESC,
+               s.created_at DESC
     `);
     res.json({ projects: rows });
   } catch (err) {
@@ -71,33 +76,38 @@ projectsRouter.post('/projects', async (req: Request, res: Response) => {
   const db = requireDb(res);
   if (!db) return;
 
-  const { project_name, website_url } = req.body ?? {};
-
-  if (!website_url) {
-    res.status(400).json({ error: 'website_url is required' });
+  const parsed = parseCreateProjectBody(req.body);
+  if (!parsed.ok) {
+    res.status(400).json({ error: parsed.error });
     return;
   }
 
-  let domain: string;
-  try {
-    domain = new URL(website_url).hostname;
-  } catch {
-    res.status(400).json({ error: 'Invalid website_url' });
-    return;
-  }
+  const { domain, websiteUrl, projectName, formValues } = parsed;
 
   try {
-    const { rows } = await db.query(
-      `INSERT INTO sites (domain, project_name, website_url, updated_at)
-       VALUES ($1, $2, $3, NOW())
+    // `xmax = 0` is true only for a freshly inserted row, so a single
+    // upsert still tells us whether it created or updated the project.
+    // last_form_values is only overwritten when this request carried a
+    // complete, valid audit configuration — never erased by a request
+    // that omitted it.
+    const { rows } = await db.query<Record<string, unknown> & { created: boolean }>(
+      `INSERT INTO sites (domain, project_name, website_url, last_form_values, updated_at)
+       VALUES ($1, $2, $3, $4::jsonb, NOW())
        ON CONFLICT (domain) DO UPDATE
-         SET project_name = EXCLUDED.project_name,
-             website_url  = EXCLUDED.website_url,
-             updated_at   = NOW()
-       RETURNING *`,
-      [domain, project_name ?? domain, website_url],
+         SET project_name     = EXCLUDED.project_name,
+             website_url      = EXCLUDED.website_url,
+             last_form_values = COALESCE(EXCLUDED.last_form_values, sites.last_form_values),
+             updated_at       = NOW()
+       RETURNING *, (xmax = 0) AS created`,
+      [domain, projectName, websiteUrl, formValues ? JSON.stringify(formValues) : null],
     );
-    res.status(201).json({ project: rows[0] });
+
+    const { created, ...project } = rows[0];
+    res.status(created ? 201 : 200).json({
+      project,
+      created,
+      automation_ready: isAutomationReady(project.last_form_values),
+    });
   } catch (err) {
     console.error('POST /api/projects error:', err);
     res.status(500).json({ error: 'Failed to create project' });

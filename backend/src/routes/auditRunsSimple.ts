@@ -8,6 +8,7 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDb } from '../lib/db.js';
+import { normalizeProjectDomain } from '../lib/normalizeProjectDomain.js';
 import { runSiteChecks } from '../services/checks/siteChecks.js';
 import { runCanonicalCheck, detectPageType, detectPageTypeWithHtml } from '../services/checks/page/canonicalCheck.js';
 import { runStructuredDataCheck } from '../services/checks/page/structuredDataCheck.js';
@@ -280,6 +281,12 @@ auditRunsRouter.post('/technical-analyzer/run', async (req: Request, res: Respon
       return;
     }
 
+    // Identity key for the `sites` upsert only — shared with POST /api/projects
+    // so the same website cannot end up as two rows depending on whether it was
+    // registered manually or implicitly here. `domain` above is untouched and
+    // remains what the audit engine actually crawls.
+    const siteDomain = normalizeProjectDomain(body.homeUrl) ?? domain;
+
     const urlMap: Record<string, string> = { home: body.homeUrl, article: body.articleUrl };
     if (body.optionalUrls) {
       for (const [type, url] of Object.entries(body.optionalUrls)) {
@@ -300,7 +307,7 @@ auditRunsRouter.post('/technical-analyzer/run', async (req: Request, res: Respon
            VALUES ($1, NOW())
            ON CONFLICT (domain) DO UPDATE SET updated_at = NOW()
            RETURNING *`,
-          [domain],
+          [siteDomain],
         );
         const site = siteRes.rows[0];
 

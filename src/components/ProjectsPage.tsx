@@ -14,6 +14,12 @@
 import { useState, useEffect, useCallback } from 'react';
 import { FolderOpen, Plus, Trash2, ExternalLink, Clock, BarChart2 } from 'lucide-react';
 import type { Project } from './ProjectSelector';
+import {
+  describeCreateOutcome,
+  describeCreateError,
+  describeListError,
+  type CreateOutcome,
+} from './projectCreateMessages';
 
 interface ProjectsPageProps {
   apiBase: string;
@@ -30,8 +36,15 @@ export default function ProjectsPage({ apiBase, onOpenProject }: ProjectsPagePro
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
   const [newUrl, setNewUrl] = useState('');
+  const [newHomeUrl, setNewHomeUrl] = useState('');
+  const [newArticleUrl, setNewArticleUrl] = useState('');
   const [createError, setCreateError] = useState('');
   const [createLoading, setCreateLoading] = useState(false);
+
+  // Post-create feedback (created vs updated, automation readiness)
+  const [notice, setNotice] = useState<CreateOutcome | null>(null);
+  /** Highlighted row — the project that was just created or updated */
+  const [highlightId, setHighlightId] = useState<string | null>(null);
 
   // Delete confirmation
   const [deleteId, setDeleteId] = useState<string | null>(null);
@@ -44,7 +57,7 @@ export default function ProjectsPage({ apiBase, onOpenProject }: ProjectsPagePro
       const res = await fetch(`${apiBase}/api/projects`);
       if (!res.ok) {
         const data = await res.json().catch(() => ({})) as { error?: string };
-        setError(data.error ?? `HTTP ${res.status}`);
+        setError(describeListError(res.status, data.error));
         return;
       }
       const data = await res.json() as { projects: Project[] };
@@ -60,20 +73,42 @@ export default function ProjectsPage({ apiBase, onOpenProject }: ProjectsPagePro
 
   const handleCreate = async () => {
     setCreateError('');
+    setNotice(null);
     if (!newUrl.trim()) { setCreateError('Website URL is required'); return; }
     setCreateLoading(true);
     try {
       const res = await fetch(`${apiBase}/api/projects`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project_name: newName.trim() || undefined, website_url: newUrl.trim() }),
+        body: JSON.stringify({
+          project_name: newName.trim() || undefined,
+          website_url: newUrl.trim(),
+          homeUrl: newHomeUrl.trim() || undefined,
+          articleUrl: newArticleUrl.trim() || undefined,
+        }),
       });
-      const data = await res.json() as { project?: Project; error?: string };
-      if (!res.ok) { setCreateError(data.error ?? 'Failed to create project'); return; }
+
+      let data: { project?: Project; created?: boolean; automation_ready?: boolean; error?: string };
+      try {
+        data = await res.json() as typeof data;
+      } catch {
+        // Never hide a backend failure behind a generic message.
+        setCreateError(`Unexpected response from the server (HTTP ${res.status})`);
+        return;
+      }
+
+      if (!res.ok) { setCreateError(describeCreateError(res.status, data.error)); return; }
+
       await fetchProjects();
+
+      setNotice(describeCreateOutcome(data));
+      setHighlightId(data.project?.id ?? null);
+
       setCreating(false);
       setNewName('');
       setNewUrl('');
+      setNewHomeUrl('');
+      setNewArticleUrl('');
     } catch {
       setCreateError('Could not reach the server');
     } finally {
@@ -155,9 +190,29 @@ export default function ProjectsPage({ apiBase, onOpenProject }: ProjectsPagePro
               <label className="text-xs text-slate-500 block mb-1">Website URL <span className="text-red-500">*</span></label>
               <input
                 className="border border-slate-200 rounded px-2 py-1.5 text-sm w-64 bg-white"
-                placeholder="https://example.com"
+                placeholder="example.com"
                 value={newUrl}
                 onChange={e => setNewUrl(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') handleCreate(); if (e.key === 'Escape') setCreating(false); }}
+              />
+            </div>
+            <div>
+              <label className="text-xs text-slate-500 block mb-1">Homepage URL</label>
+              <input
+                className="border border-slate-200 rounded px-2 py-1.5 text-sm w-64 bg-white"
+                placeholder="https://example.com/"
+                value={newHomeUrl}
+                onChange={e => setNewHomeUrl(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') handleCreate(); if (e.key === 'Escape') setCreating(false); }}
+              />
+            </div>
+            <div>
+              <label className="text-xs text-slate-500 block mb-1">Article URL</label>
+              <input
+                className="border border-slate-200 rounded px-2 py-1.5 text-sm w-64 bg-white"
+                placeholder="https://example.com/an-article"
+                value={newArticleUrl}
+                onChange={e => setNewArticleUrl(e.target.value)}
                 onKeyDown={e => { if (e.key === 'Enter') handleCreate(); if (e.key === 'Escape') setCreating(false); }}
               />
             </div>
@@ -169,13 +224,39 @@ export default function ProjectsPage({ apiBase, onOpenProject }: ProjectsPagePro
               {createLoading ? 'Creating…' : 'Create'}
             </button>
             <button
-              onClick={() => { setCreating(false); setCreateError(''); setNewName(''); setNewUrl(''); }}
+              onClick={() => {
+                setCreating(false); setCreateError('');
+                setNewName(''); setNewUrl(''); setNewHomeUrl(''); setNewArticleUrl('');
+              }}
               className="text-sm border border-slate-200 bg-white rounded px-3 py-1.5 hover:bg-slate-50"
             >
               Cancel
             </button>
           </div>
+          <p className="text-xs text-slate-500 mt-2">
+            Homepage and article URL are optional, but a project needs both before automated audits can run.
+            They must belong to the same domain as the website URL.
+          </p>
           {createError && <p className="text-xs text-red-500 mt-2">{createError}</p>}
+        </div>
+      )}
+
+      {/* Post-create feedback */}
+      {notice && (
+        <div
+          className={`rounded-lg px-4 py-2.5 mb-5 text-sm flex items-start justify-between gap-3 border ${
+            notice.tone === 'success'
+              ? 'bg-green-50 border-green-200 text-green-800'
+              : 'bg-amber-50 border-amber-200 text-amber-800'
+          }`}
+        >
+          <span>{notice.text}</span>
+          <button
+            onClick={() => { setNotice(null); setHighlightId(null); }}
+            className="text-xs underline opacity-70 hover:opacity-100 flex-shrink-0"
+          >
+            Dismiss
+          </button>
         </div>
       )}
 
@@ -206,9 +287,20 @@ export default function ProjectsPage({ apiBase, onOpenProject }: ProjectsPagePro
             </thead>
             <tbody className="divide-y divide-slate-100">
               {projects.map(p => (
-                <tr key={p.id} className="hover:bg-slate-50">
+                <tr
+                  key={p.id}
+                  className={p.id === highlightId ? 'bg-blue-50' : 'hover:bg-slate-50'}
+                >
                   <td className="px-4 py-3 font-medium text-slate-700">
                     {p.project_name ?? p.domain}
+                    {!p.last_form_values?.homeUrl || !p.last_form_values?.articleUrl ? (
+                      <span
+                        className="ml-2 text-[10px] font-normal text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5"
+                        title="Needs a homepage and article URL before automated audits can run"
+                      >
+                        no audit config
+                      </span>
+                    ) : null}
                   </td>
                   <td className="px-4 py-3 text-slate-500 text-xs font-mono">
                     {p.domain}
