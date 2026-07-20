@@ -6,6 +6,9 @@
  *  - UNCHANGED: fingerprint exists and was ACTIVE in the previous snapshot
  *  - REOPENED:  fingerprint existed but was RESOLVED before this audit
  *  - RESOLVED:  fingerprint was ACTIVE previously and is absent now
+ *  - RECONCILED: absent, but the row's stored identity could not be migrated
+ *                to the v2 fingerprint algorithm, so its absence is not
+ *                evidence of a fix. Retired silently, never alerted.
  *
  * The snapshot insert and all lifecycle transitions happen atomically in a
  * single SQLite transaction. Failed/timed-out/partial audits never reach
@@ -78,7 +81,11 @@ export class StateStore {
     now = new Date().toISOString(),
   }) {
     const db = this.db;
-    const result = { new: [], reopened: [], unchanged: [], resolved: [] };
+    // `reconciled` holds issues retired by the first post-upgrade audit whose
+    // stored identity could not be migrated to v2. It is deliberately NOT part
+    // of the notification identity or the alert thresholds — see
+    // notificationPipeline.notificationIdentity / shouldNotify.
+    const result = { new: [], reopened: [], unchanged: [], resolved: [], reconciled: [] };
 
     db.exec('BEGIN IMMEDIATE');
     try {
@@ -91,8 +98,9 @@ export class StateStore {
       const insertIssue = db.prepare(`
         INSERT INTO issue_states
           (project_id, fingerprint, area, normalized_url, message, fix_hint, page_type,
-           first_seen_at, last_seen_at, last_audit_run_id, state, resolved_at, reopened_count)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', NULL, 0)
+           first_seen_at, last_seen_at, last_audit_run_id, state, resolved_at, reopened_count,
+           fingerprint_version, needs_reconciliation)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', NULL, 0, 2, 0)
       `);
       const touchIssue = db.prepare(`
         UPDATE issue_states
@@ -109,6 +117,10 @@ export class StateStore {
         UPDATE issue_states
         SET state = 'RESOLVED', resolved_at = ?, last_audit_run_id = ?
         WHERE project_id = ? AND fingerprint = ?
+      `);
+      const clearReconciliation = db.prepare(`
+        UPDATE issue_states SET needs_reconciliation = 0
+        WHERE project_id = ? AND needs_reconciliation = 1
       `);
 
       for (const issue of issues) {
@@ -137,7 +149,7 @@ export class StateStore {
       for (const row of existingRows) {
         if (row.state === 'ACTIVE' && !currentFps.has(row.fingerprint)) {
           resolveIssue.run(now, auditRunId, projectId, row.fingerprint);
-          result.resolved.push({
+          const issue = {
             fingerprint: row.fingerprint,
             area: row.area,
             message: row.message,
@@ -145,9 +157,18 @@ export class StateStore {
             pageUrl: row.normalized_url,
             pageType: row.page_type,
             source: row.normalized_url ? 'page' : 'site',
-          });
+          };
+          // A row the v1→v2 migration could not re-identify carries an
+          // unusable fingerprint, so its absence here proves nothing. Retire
+          // it quietly rather than claiming a critical issue was fixed.
+          if (Number(row.needs_reconciliation) === 1) result.reconciled.push(issue);
+          else result.resolved.push(issue);
         }
       }
+
+      // The first post-upgrade audit for this project has now re-established
+      // the truth for every stored issue; the flag has served its purpose.
+      clearReconciliation.run(projectId);
 
       db.prepare(`
         INSERT INTO project_snapshots

@@ -18,6 +18,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
+import { applyFingerprintMigrationV2 } from './migrations/fingerprintMigration.js';
 
 export const MIGRATIONS = [
   {
@@ -94,6 +95,32 @@ export const MIGRATIONS = [
       `);
     },
   },
+  {
+    version: 2,
+    name: 'fingerprint-v1-to-v2',
+    /**
+     * Re-identify stored issues under the v2 fingerprint algorithm.
+     *
+     * Only `issue_states` is touched. `notifications` is deliberately left
+     * alone: those rows are the historical record of what was actually sent,
+     * including the fingerprints quoted in delivered payloads. Rewriting them
+     * would falsify delivery history and change notification identities,
+     * breaking the idempotency guarantee for already-delivered messages.
+     * `project_snapshots` and `automation_runs` are likewise untouched.
+     */
+    up(db, { logger = null } = {}) {
+      db.exec(`
+        ALTER TABLE issue_states ADD COLUMN fingerprint_version INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE issue_states ADD COLUMN legacy_fingerprint TEXT;
+        ALTER TABLE issue_states ADD COLUMN needs_reconciliation INTEGER NOT NULL DEFAULT 0;
+      `);
+      applyFingerprintMigrationV2(db, { logger });
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_issue_states_reconciliation
+          ON issue_states (project_id, needs_reconciliation);
+      `);
+    },
+  },
 ];
 
 export function migrate(db, { dbPath = null, logger = null } = {}) {
@@ -127,7 +154,7 @@ export function migrate(db, { dbPath = null, logger = null } = {}) {
   for (const migration of pending) {
     db.exec('BEGIN IMMEDIATE');
     try {
-      migration.up(db);
+      migration.up(db, { logger });
       db.prepare('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)')
         .run(migration.version, migration.name, new Date().toISOString());
       db.exec('COMMIT');
