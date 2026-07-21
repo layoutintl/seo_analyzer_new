@@ -336,6 +336,38 @@ maybe_chown root:root "$wrapper_tmp"
 mv -f -- "$wrapper_tmp" "$WRAPPER_DST"
 log "installed command wrapper at $WRAPPER_DST"
 
+# ── systemd units: INSTALLED but NEVER enabled or started ──────────
+# This script deliberately never invokes systemctl. After a system
+# install, run `systemctl daemon-reload` yourself; enabling any timer is
+# a separate explicit administrator decision gated by
+# docs/PRODUCTION_GATES.md (all timers ship disabled).
+SYSTEMD_DST=$DESTDIR/etc/systemd/system
+if [ -d "$SOURCE_DIR/deploy/systemd" ]; then
+  mkdir -p -- "$SYSTEMD_DST"
+  for unit in "$SOURCE_DIR"/deploy/systemd/*.service "$SOURCE_DIR"/deploy/systemd/*.timer; do
+    [ -f "$unit" ] || continue
+    unit_name=${unit##*/}
+    unit_tmp=$SYSTEMD_DST/.$unit_name.tmp.$$
+    cp -- "$unit" "$unit_tmp"
+    chmod 0644 -- "$unit_tmp"
+    maybe_chown root:root "$unit_tmp"
+    mv -f -- "$unit_tmp" "$SYSTEMD_DST/$unit_name"
+  done
+  log "installed systemd units into $SYSTEMD_DST (all timers DISABLED; run 'systemctl daemon-reload' manually)"
+fi
+
+# Reference copies of the optional cron/logrotate examples (documentation
+# only — nothing is installed into /etc/cron.d or /etc/logrotate.d).
+for example in cron.example logrotate.example; do
+  if [ -f "$SOURCE_DIR/deploy/$example" ]; then
+    example_tmp=$ETC_DIR/.$example.tmp.$$
+    cp -- "$SOURCE_DIR/deploy/$example" "$example_tmp"
+    chmod 0644 -- "$example_tmp"
+    maybe_chown root:root "$example_tmp"
+    mv -f -- "$example_tmp" "$ETC_DIR/$example"
+  fi
+done
+
 # ── Post-install validation (safe: no audit is triggered; validate-config
 #    only checks configuration and opens the runner-owned SQLite state) ──
 if [ -n "$DESTDIR" ]; then
@@ -366,4 +398,5 @@ log "  node:    $NODE_DST (v$NODE_VERSION${NODE_SQLITE_FLAG:+, wrapper adds $NOD
 log "  command: $WRAPPER_DST"
 log "  config:  $ENV_DST"
 log "  state:   $STATE_DIR (preserved across installs)"
-log "NO systemd units were installed and NO scheduling was enabled (Phase 4C+; timers ship disabled even then)."
+log "systemd units installed DISABLED — NO timer was enabled and NO scheduling is active."
+log "Next steps: edit $ENV_DST, run 'seo-audit-runner doctor', then see deploy/SERVER-HANDOVER.md before enabling any timer."

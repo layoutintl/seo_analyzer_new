@@ -147,7 +147,21 @@ seo-audit-runner retry-notifications --dry-run       # list eligible, send nothi
 
 seo-audit-runner status                   # runner-owned state report
 seo-audit-runner status --output json
+
+seo-audit-runner health                   # fast check: 0 healthy / 1 unhealthy / 2 degraded
+seo-audit-runner doctor                   # + DB integrity, disk space, systemd probing
+
+seo-audit-runner job create --project PROJECT_ID   # queue a manual audit job
+seo-audit-runner job list [--status FAILED] [--limit 20]
+seo-audit-runner job show|retry|cancel JOB_ID
+seo-audit-runner schedule create --frequency daily --at 03:00 --all
+seo-audit-runner schedule enable|disable|update|delete SCHEDULE_ID
+seo-audit-runner schedule list
+seo-audit-runner worker --once            # one scheduler tick (run by seo-runner-tick.timer)
 ```
+
+Jobs and schedules (the backend-controllable layer) are documented in
+`docs/JOBS_AND_SCHEDULES.md` and `docs/BACKEND_CONTROL_API.md`.
 
 ### What a run does
 
@@ -264,13 +278,12 @@ affect these codes — they appear in the report and the retry queue.
 
 ## Scheduling on Linux
 
-```cron
-0 6 * * * cd /opt/seo-analyzer/ops/seo-audit-runner && /usr/bin/node bin/seo-audit-runner.js run --all >> /var/log/seo-audit-runner.log 2>&1
-15 * * * * cd /opt/seo-analyzer/ops/seo-audit-runner && /usr/bin/node bin/seo-audit-runner.js retry-notifications >> /var/log/seo-audit-runner.log 2>&1
-```
-
-(systemd service/timer equivalents work identically — `Type=oneshot`,
-`WorkingDirectory=` the runner dir, `ExecStart=` the same command.)
+Production scheduling ships as hardened systemd units in `deploy/systemd/`
+(installed DISABLED by `deploy/install.sh`; see
+`deploy/SERVER-HANDOVER.md` §7 for the two supported models — the classic
+daily timer or runner-managed schedules via the tick timer). A cron
+fallback for hosts without systemd is documented in `deploy/cron.example`.
+Never enable cron and systemd for the same command on the same host.
 
 ## Tests
 

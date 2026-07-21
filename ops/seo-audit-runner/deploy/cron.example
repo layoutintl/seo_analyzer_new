@@ -1,0 +1,19 @@
+# cron.example — DOCUMENTED FALLBACK ONLY, never installed automatically.
+#
+# Use cron ONLY on hosts without systemd, and NEVER together with the
+# systemd timers for the same command (duplicate scheduling contract,
+# deploy/README-deploy.md §4). Cron runs in the HOST timezone: set the host
+# to Africa/Cairo (timedatectl set-timezone Africa/Cairo) or adjust the
+# hour. Cron has no Persistent= catch-up: a run missed while the host was
+# down is skipped (the tick model catches up by itself within 24h).
+#
+# Install as /etc/cron.d/seo-audit-runner (mode 0644, owner root:root).
+# Format: m h dom mon dow user command
+
+# EITHER: classic daily full audit at 03:00 host time + hourly retry
+0 3 * * *   seo-runner  /usr/local/bin/seo-audit-runner run --all >> /var/log/seo-audit-runner/cron.log 2>&1
+0 * * * *   seo-runner  /usr/local/bin/seo-audit-runner retry-notifications >> /var/log/seo-audit-runner/cron.log 2>&1
+
+# OR: scheduler tick every 5 minutes (runner-managed schedules; comment the
+# daily line above if schedules cover the full audit)
+#*/5 * * * * seo-runner  /usr/local/bin/seo-audit-runner worker --once >> /var/log/seo-audit-runner/cron.log 2>&1
