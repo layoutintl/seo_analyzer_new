@@ -121,6 +121,59 @@ export const MIGRATIONS = [
       `);
     },
   },
+  {
+    version: 3,
+    name: 'jobs-and-schedules',
+    /**
+     * Phase 4C+: runner-owned job queue and recurring schedules.
+     *
+     * Jobs and schedules live ONLY in this runner-owned SQLite database —
+     * never in the main application's PostgreSQL (isolation contract,
+     * docs/DEPLOYMENT_ARCHITECTURE.md §2). The unique (schedule_id,
+     * occurrence_key) index is the at-most-one-job-per-occurrence guarantee.
+     * No secrets are ever stored here (sanitized error text only).
+     */
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS schedules (
+          id             TEXT PRIMARY KEY,
+          project_id     TEXT,                -- NULL = audit all projects
+          frequency      TEXT NOT NULL,       -- daily | weekly | monthly
+          at_hour        INTEGER NOT NULL,
+          at_minute      INTEGER NOT NULL,
+          day_of_week    INTEGER,             -- 0=Sun..6=Sat (weekly only)
+          day_of_month   INTEGER,             -- 1..31, clamped (monthly only)
+          timezone       TEXT NOT NULL,       -- IANA name, e.g. Africa/Cairo
+          enabled        INTEGER NOT NULL DEFAULT 0,
+          created_at     TEXT NOT NULL,
+          updated_at     TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS jobs (
+          id              TEXT PRIMARY KEY,
+          type            TEXT NOT NULL DEFAULT 'audit',
+          project_id      TEXT,               -- NULL = audit all projects
+          schedule_id     TEXT,               -- NULL = manual job
+          occurrence_key  TEXT,               -- schedule occurrence bucket
+          status          TEXT NOT NULL,      -- QUEUED|RUNNING|SUCCEEDED|FAILED|CANCELLED
+          requested_by    TEXT NOT NULL DEFAULT 'cli',
+          attempts        INTEGER NOT NULL DEFAULT 0,
+          exit_code       INTEGER,
+          error           TEXT,               -- sanitized, never secrets
+          created_at      TEXT NOT NULL,
+          started_at      TEXT,
+          finished_at     TEXT,
+          updated_at      TEXT NOT NULL,
+          worker_pid      INTEGER
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_schedule_occurrence
+          ON jobs (schedule_id, occurrence_key)
+          WHERE schedule_id IS NOT NULL AND occurrence_key IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs (status, created_at);
+      `);
+    },
+  },
 ];
 
 export function migrate(db, { dbPath = null, logger = null } = {}) {

@@ -110,7 +110,7 @@ test('fresh staged install creates the approved layout and passes validation', {
   // Post-install validation actually ran and passed.
   assert.match(r.stdout, /Configuration OK/);
   assert.match(r.stdout, /post-install validation OK/);
-  assert.match(r.stdout, /NO systemd units were installed and NO scheduling was enabled/);
+  assert.match(r.stdout, /NO timer was enabled and NO scheduling is active/);
 });
 
 test('re-running the installer is idempotent (same release kept, env preserved)', { skip }, () => {
@@ -235,7 +235,7 @@ test('directory permissions and ownership follow the deployment contract', { ski
   assert.equal(useraddAfter.length, 1, 'useradd ran again on an idempotent re-install');
 });
 
-test('no systemd units are installed, no timers enabled, systemctl never invoked', { skip }, () => {
+test('systemd units are installed DISABLED: systemctl never invoked, nothing enabled', { skip }, () => {
   const fx = fixture();
   const mockBin = path.join(fx.work, 'mockbin');
   const mockLog = path.join(fx.work, 'mock.log');
@@ -243,10 +243,29 @@ test('no systemd units are installed, no timers enabled, systemctl never invoked
   const r = install(fx, [], { env: { SEO_RUNNER_MOCK_LOG: toPosix(mockLog) }, mockBin });
   assert.equal(r.status, 0, r.output);
 
-  assert.ok(!fs.existsSync(path.join(fx.destdir, 'etc', 'systemd')), 'etc/systemd was created');
-  const unitFiles = listTree(fx.destdir).filter((p) => p.endsWith('.service') || p.endsWith('.timer'));
-  assert.deepEqual(unitFiles, [], `unit files appeared: ${unitFiles}`);
+  const systemdDir = path.join(fx.destdir, 'etc', 'systemd', 'system');
+  const units = fs.readdirSync(systemdDir).sort();
+  assert.deepEqual(units, [
+    'seo-audit-runner.service',
+    'seo-audit-runner.timer',
+    'seo-runner-retry.service',
+    'seo-runner-retry.timer',
+    'seo-runner-tick.service',
+    'seo-runner-tick.timer',
+  ]);
+  // Installed unit files are byte-identical to the shipped ones.
+  for (const unit of units) {
+    assert.equal(
+      fs.readFileSync(path.join(systemdDir, unit), 'utf8'),
+      fs.readFileSync(path.join(RUNNER_ROOT, 'deploy', 'systemd', unit), 'utf8'),
+      `${unit} differs from the shipped unit`,
+    );
+  }
+  // Never enabled: no systemctl call, no enablement symlink directories.
   assert.equal(readMockLog(mockLog), '', 'systemctl was invoked during install');
+  const wants = listTree(fx.destdir).filter((p) => p.includes('.wants/'));
+  assert.deepEqual(wants, [], `enablement symlinks appeared: ${wants}`);
+  assert.match(r.stdout, /all timers DISABLED/);
 });
 
 test('installer writes nothing outside --destdir and deletes nothing from the source tree', { skip }, () => {

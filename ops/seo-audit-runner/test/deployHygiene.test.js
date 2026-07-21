@@ -4,63 +4,86 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
-  CHECK_NODE_SH,
   ENV_EXAMPLE,
-  INSTALL_SH,
   RUNNER_ROOT,
-  WRAPPER_SH,
   bashMissing,
   findBash,
 } from '../tools/shellHarness.js';
 
-const SHELL_SCRIPTS = [INSTALL_SH, CHECK_NODE_SH, WRAPPER_SH];
-const ALL_DEPLOY_FILES = [...SHELL_SCRIPTS, ENV_EXAMPLE];
+const DEPLOY = (name) => path.join(RUNNER_ROOT, 'deploy', name);
 
-test('deployment shell scripts and env template are LF-only (no CR bytes)', () => {
-  for (const file of ALL_DEPLOY_FILES) {
+const SHELL_SCRIPTS = [
+  'install.sh',
+  'check-node.sh',
+  'seo-audit-runner-wrapper.sh',
+  'backup.sh',
+  'restore.sh',
+  'upgrade.sh',
+  'rollback.sh',
+  'uninstall.sh',
+  'purge.sh',
+  'smoke-test.sh',
+].map(DEPLOY);
+
+// Scripts that must NEVER invoke systemctl at all (uninstall.sh may
+// stop/disable; smoke-test.sh may query state — nothing else touches it).
+const NO_SYSTEMCTL = SHELL_SCRIPTS.filter(
+  (f) => !['uninstall.sh', 'smoke-test.sh'].includes(path.basename(f)),
+);
+
+const EXAMPLES = [DEPLOY('cron.example'), DEPLOY('logrotate.example')];
+
+const codeLines = (file) =>
+  fs
+    .readFileSync(file, 'utf8')
+    .split('\n')
+    .filter((line) => !/^\s*#/.test(line))
+    .join('\n');
+
+test('deployment shell scripts, examples, and env template are LF-only', () => {
+  for (const file of [...SHELL_SCRIPTS, ...EXAMPLES, ENV_EXAMPLE, DEPLOY('state-db-tool.js')]) {
     const bytes = fs.readFileSync(file);
     assert.ok(!bytes.includes(0x0d), `${path.basename(file)} contains CR bytes (CRLF line endings)`);
   }
 });
 
-test('deployment shell scripts start with a bash shebang', () => {
+test('deployment shell scripts start with a bash shebang and strict mode', () => {
   for (const file of SHELL_SCRIPTS) {
-    const firstLine = fs.readFileSync(file, 'utf8').split('\n', 1)[0];
-    assert.equal(firstLine, '#!/usr/bin/env bash', `${path.basename(file)} shebang: ${firstLine}`);
-  }
-});
-
-test('deployment shell scripts use strict mode', () => {
-  for (const file of SHELL_SCRIPTS) {
-    assert.match(
-      fs.readFileSync(file, 'utf8'),
-      /^set -Eeuo pipefail$/m,
-      `${path.basename(file)} is missing set -Eeuo pipefail`,
-    );
+    const content = fs.readFileSync(file, 'utf8');
+    assert.equal(content.split('\n', 1)[0], '#!/usr/bin/env bash', path.basename(file));
+    // smoke-test.sh intentionally omits -e (it reports per-check failures).
+    assert.match(content, /^set -E(e)?uo pipefail$/m, `${path.basename(file)} missing strict mode`);
   }
 });
 
 test('no eval anywhere in the deployment scripts (comments excluded)', () => {
   for (const file of SHELL_SCRIPTS) {
-    const code = fs
-      .readFileSync(file, 'utf8')
-      .split('\n')
-      .filter((line) => !/^\s*#/.test(line))
-      .join('\n');
-    assert.ok(!/\beval\b/.test(code), `${path.basename(file)} uses eval`);
+    assert.ok(!/\beval\b/.test(codeLines(file)), `${path.basename(file)} uses eval`);
   }
 });
 
-test('deployment scripts never reference systemctl, systemd units, or crontab', () => {
-  for (const file of SHELL_SCRIPTS) {
-    const code = fs
-      .readFileSync(file, 'utf8')
+test('only uninstall/smoke may invoke systemctl; nothing ever enables or starts units', () => {
+  const invocation = /(^|[\s;&|(`]|\$\()systemctl\b/m;
+  for (const file of NO_SYSTEMCTL) {
+    // Quoted mentions inside log strings are fine; invocations are not.
+    const suspicious = codeLines(file)
       .split('\n')
-      .filter((line) => !/^\s*#/.test(line))
-      .join('\n');
-    assert.ok(!/\bsystemctl\b/.test(code), `${path.basename(file)} invokes systemctl`);
-    assert.ok(!/\bcrontab\b/.test(code), `${path.basename(file)} invokes crontab`);
-    assert.ok(!/\.service\b|\.timer\b/.test(code), `${path.basename(file)} references unit files`);
+      .filter((line) => invocation.test(line.replace(/'[^']*'|"[^"]*"/g, '')));
+    assert.deepEqual(suspicious, [], `${path.basename(file)} invokes systemctl`);
+  }
+  for (const file of SHELL_SCRIPTS) {
+    assert.ok(
+      !/systemctl\s+(enable|start)\b/.test(codeLines(file)),
+      `${path.basename(file)} enables or starts a unit — installation must never do that`,
+    );
+    assert.ok(!/\bcrontab\b/.test(codeLines(file)), `${path.basename(file)} invokes crontab`);
+  }
+});
+
+test('check-node and the wrapper stay free of unit-file references', () => {
+  for (const file of [DEPLOY('check-node.sh'), DEPLOY('seo-audit-runner-wrapper.sh')]) {
+    const code = codeLines(file);
+    assert.ok(!/\.service\b|\.timer\b|\bsystemctl\b/.test(code), `${path.basename(file)} references systemd`);
   }
 });
 
@@ -86,10 +109,19 @@ test('env template does not pretend RUNNER_LOCK_DIR is supported (Phase 4F item)
   assert.ok(!/RUNNER_LOCK_DIR/.test(content), 'RUNNER_LOCK_DIR is not implemented until Phase 4F');
 });
 
+test('cron example ships fully commented or user-field formatted, never auto-installed', () => {
+  const content = fs.readFileSync(DEPLOY('cron.example'), 'utf8');
+  assert.match(content, /never installed automatically/i);
+  // Every active line must be a comment or an /etc/cron.d line running as seo-runner.
+  for (const line of content.split('\n')) {
+    if (!line.trim() || line.trim().startsWith('#')) continue;
+    assert.match(line, /\sseo-runner\s+\/usr\/local\/bin\/seo-audit-runner\s/, `cron line must run as seo-runner: ${line}`);
+  }
+});
+
 test('all deployment scripts pass bash -n (syntax check)', { skip: bashMissing() ? 'no bash available' : false }, () => {
   for (const file of SHELL_SCRIPTS) {
-    const rel = path.relative(RUNNER_ROOT, file).replace(/\\/g, '/');
     const r = spawnSync(findBash(), ['-n', file.replace(/\\/g, '/')], { encoding: 'utf8' });
-    assert.equal(r.status, 0, `bash -n failed for ${rel}: ${r.stdout}${r.stderr}`);
+    assert.equal(r.status, 0, `bash -n failed for ${path.basename(file)}: ${r.stdout}${r.stderr}`);
   }
 });

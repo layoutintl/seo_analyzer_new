@@ -1,0 +1,17 @@
+# seo-runner-tick.timer — scheduler tick every 5 minutes.
+# SHIPS DISABLED. Enable this INSTEAD OF seo-audit-runner.timer when
+# schedules are managed through `seo-audit-runner schedule ...`
+# (backend-controlled model). Missed ticks need no catch-up: the next
+# tick evaluates due occurrences itself (catch-up window 24h, at most one
+# job per occurrence).
+[Unit]
+Description=SEO runner scheduler tick (every 5 minutes)
+
+[Timer]
+OnCalendar=*:0/5
+AccuracySec=1min
+Persistent=false
+Unit=seo-runner-tick.service
+
+[Install]
+WantedBy=timers.target

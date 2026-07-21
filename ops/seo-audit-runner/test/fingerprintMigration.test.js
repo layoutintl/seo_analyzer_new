@@ -150,7 +150,8 @@ test('migration brings a v1 database to schema version 2', () => {
   assert.equal(db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v, 1);
 
   const version = migrate(db, { dbPath });
-  assert.equal(version, 2);
+  assert.ok(version >= 2, `fingerprint migration v2 must be applied (got v${version})`);
+  assert.equal(version, MIGRATIONS.at(-1).version, 'all pending migrations must be applied');
 
   const cols = db.prepare('PRAGMA table_info(issue_states)').all().map((c) => c.name);
   for (const col of ['fingerprint_version', 'legacy_fingerprint', 'needs_reconciliation']) {
@@ -168,9 +169,12 @@ test('migrating twice is a no-op', () => {
   const version = migrate(db, { dbPath });
   const after2 = db.prepare('SELECT * FROM issue_states').all();
 
-  assert.equal(version, 2);
+  assert.equal(version, MIGRATIONS.at(-1).version);
   assert.deepEqual(after2, after1);
-  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get().n, 2);
+  assert.equal(
+    db.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get().n,
+    MIGRATIONS.length,
+  );
 });
 
 test('a safety backup is written before upgrading an existing database', () => {
@@ -609,6 +613,6 @@ test('a failing migration rolls back and leaves v1 state intact', () => {
 test('an empty v1 database migrates cleanly', () => {
   const dbPath = tmpDbPath();
   const db = openV1Db(dbPath);
-  assert.equal(migrate(db, { dbPath }), 2);
+  assert.equal(migrate(db, { dbPath }), MIGRATIONS.at(-1).version);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM issue_states').get().n, 0);
 });

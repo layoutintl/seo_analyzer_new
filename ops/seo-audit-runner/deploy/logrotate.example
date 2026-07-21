@@ -1,0 +1,23 @@
+# logrotate.example — for FILE-BASED logs only (cron mode / redirected
+# output). Under systemd, journald is the primary log mechanism and needs
+# no logrotate (see deploy/SERVER-HANDOVER.md §Logs for journalctl usage).
+#
+# Install as /etc/logrotate.d/seo-audit-runner (mode 0644, owner root:root)
+# ONLY if you redirect runner output into /var/log/seo-audit-runner/.
+#
+# Retention: 8 rotations, weekly or when a file exceeds 50 MB, compressed.
+# Rotated files stay owned by seo-runner with group-read only (0640) — the
+# runner's logger already redacts Slack tokens/webhooks, and no secrets are
+# ever written to logs.
+
+/var/log/seo-audit-runner/*.log {
+    weekly
+    maxsize 50M
+    rotate 8
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 seo-runner seo-runner
+    su seo-runner seo-runner
+}

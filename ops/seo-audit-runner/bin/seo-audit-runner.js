@@ -36,6 +36,12 @@ import { openStateDb } from '../src/db.js';
 import { StateStore } from '../src/stateStore.js';
 import { createSlackSender } from '../src/slackClient.js';
 import { createNotificationPipeline, retryPendingNotifications } from '../src/notificationPipeline.js';
+import {
+  jobCommand,
+  scheduleCommand,
+  workerCommand,
+  healthCommand,
+} from '../src/cli/manage.js';
 
 const USAGE = `Usage: seo-audit-runner <command> [options]
 
@@ -46,6 +52,22 @@ Commands:
   run --project <id>        Audit a single project by ID
   retry-notifications       Retry queued/failed Slack notifications
   status                    Show runner-owned state (no audits triggered)
+  health                    Fast health check   (exit 0 healthy / 1 unhealthy / 2 degraded)
+  doctor                    Deep diagnostics    (adds integrity, disk, systemd checks)
+  worker --once             One scheduler tick: enqueue due schedules, run queued jobs
+  job <action>              create | list | show | retry | cancel   (runner-owned queue)
+  schedule <action>         create | update | enable | disable | delete | list
+
+job options:
+  job create --project <id> | --all
+  job list [--status QUEUED|RUNNING|SUCCEEDED|FAILED|CANCELLED] [--limit <n>]
+  job show|retry|cancel <id>
+
+schedule options:
+  schedule create --frequency daily|weekly|monthly --at HH:MM
+                  [--project <id> | --all] [--timezone <IANA>]
+                  [--day-of-week 0..6] [--day-of-month 1..31]
+  schedule update <id> [same flags]      (created disabled; enable explicitly)
 
 Run options:
   --dry-run                 Plan only: no audit started, no state written,
@@ -90,6 +112,13 @@ async function main() {
         limit: { type: 'string' },
         output: { type: 'string' },
         'env-file': { type: 'string' },
+        frequency: { type: 'string' },
+        at: { type: 'string' },
+        timezone: { type: 'string' },
+        'day-of-week': { type: 'string' },
+        'day-of-month': { type: 'string' },
+        status: { type: 'string' },
+        once: { type: 'boolean', default: false },
         help: { type: 'boolean', default: false },
       },
     });
@@ -132,6 +161,16 @@ async function main() {
       return retryNotificationsCommand(config, logger, values);
     case 'status':
       return statusCommand(config, logger, values);
+    case 'health':
+      return healthCommand(config, logger, values, 'health');
+    case 'doctor':
+      return healthCommand(config, logger, values, 'doctor');
+    case 'worker':
+      return workerCommand(config, logger, values);
+    case 'job':
+      return jobCommand(config, logger, values, positionals);
+    case 'schedule':
+      return scheduleCommand(config, logger, values, positionals);
     default:
       return fail(`Unknown command: ${command}\n\n${USAGE}`);
   }
