@@ -1,8 +1,9 @@
 # Deployment Contracts — SEO Audit Runner
 
-Status: **approved contract** (Phase 4A). This file defines the target layout
-and the behavioral contracts that the Phase 4B–4E scripts must implement.
-No script referenced here exists yet; nothing in this document is executable.
+Status: **approved contract** (Phase 4A, paths corrected). This file defines
+the target layout and the behavioral contracts that the Phase 4B–4E scripts
+must implement. No script referenced here exists yet; nothing in this
+document is executable.
 
 Architecture decision and isolation rules: `../docs/DEPLOYMENT_ARCHITECTURE.md`.
 Safety gates: `../docs/PRODUCTION_GATES.md`.
@@ -15,18 +16,31 @@ Safety gates: `../docs/PRODUCTION_GATES.md`.
 | `/opt/seo-audit-runner/current`             | symlink → active release         | `root:root`        | —     |
 | `/opt/seo-audit-runner/node/`               | isolated Node runtime (≥22.5, 24 LTS preferred) | `root:root` | 0755 |
 | `/usr/local/bin/seo-audit-runner`           | command wrapper (symlink/script) | `root:root`        | 0755  |
-| `/etc/seo-runner/env`                       | runner environment (secrets)     | `root:seo-runner`  | 0640  |
-| `/var/lib/seo-runner/state/`                | `RUNNER_STATE_DIR` (SQLite etc.) | `seo-runner:seo-runner` | 0700 |
-| `/var/backups/seo-runner/`                  | state backups                    | `seo-runner:seo-runner` | 0700 |
+| `/etc/seo-audit-runner/`                    | runner configuration directory   | `root:root`        | 0755  |
+| `/etc/seo-audit-runner/runner.env`          | runner environment (secrets)     | `root:seo-runner`  | 0640  |
+| `/var/lib/seo-audit-runner/`                | `RUNNER_STATE_DIR` — SQLite, journals, migration backups | `seo-runner:seo-runner` | 0700 |
+| `/var/lib/seo-audit-runner/backups/`        | operational state backups        | `seo-runner:seo-runner` | 0700 |
+| `/var/log/seo-audit-runner/`                | OPTIONAL file-log dir (cron mode / redirected output) | `seo-runner:seo-runner` | 0750 |
+| `/run/seo-audit-runner/`                    | ephemeral runtime dir (PID/lock TARGET — see §2a) | `seo-runner:seo-runner` | 0750 |
 | systemd units in `/etc/systemd/system/`     | service + timers (Phase 4C)      | `root:root`        | 0644  |
 
 Notes:
 - Releases are immutable: an upgrade installs a new `releases/<stamp>/` and
-  flips the `current` symlink. Code directories are read-only for `seo-runner`
-  (root-owned); the runner only ever writes inside `/var/lib/seo-runner/state`.
-- Logs go to journald; no log files and no logrotate requirement in the
-  default layout. If an operator redirects output to files instead, they own
-  rotation (a `logrotate.example` may ship in a later phase).
+  flips the `current` symlink. Code directories are read-only for
+  `seo-runner` (root-owned); the runner only ever writes inside
+  `/var/lib/seo-audit-runner/` (and `/var/log/seo-audit-runner/` when an
+  operator chooses file logging).
+- The state database is expected at
+  `/var/lib/seo-audit-runner/runner-state.sqlite` (the runner's default:
+  `<RUNNER_STATE_DIR>/runner-state.sqlite`).
+- Logging: **journald is the primary mechanism under systemd** — the runner
+  logs to stdout/stderr and must never REQUIRE file logging when run through
+  systemd. `/var/log/seo-audit-runner/` exists only for cron mode, redirected
+  output, or operator-managed file logging; whoever redirects output there
+  owns rotation (a `logrotate.example` may ship in a later phase).
+- `/run/seo-audit-runner/` is tmpfs-backed and recreated at boot (via systemd
+  `RuntimeDirectory=seo-audit-runner` in Phase 4C). See §2a for the lock-file
+  transition caveat.
 - A non-root "user mode" install (everything under `~/seo-audit-runner/`,
   cron instead of system units) is a documented degraded option for hosts
   without root; contracts below still apply with paths translated.
@@ -38,24 +52,43 @@ Notes:
 - Adds `--experimental-sqlite` automatically when the resolved Node major
   version is 22 or 23; adds nothing on 24+.
 - Executes `/opt/seo-audit-runner/current/bin/seo-audit-runner.js "$@"` with
-  the environment loaded by systemd (`EnvironmentFile=/etc/seo-runner/env`);
-  when invoked interactively it sources the same file if readable.
+  the environment loaded by systemd
+  (`EnvironmentFile=/etc/seo-audit-runner/runner.env`); when invoked
+  interactively it sources the same file if readable.
 - Exit codes pass through unchanged (0/1/2/3/4 — see runner README).
+
+## 2a. Runtime directory and lock-file transition (Phase 4F dependency)
+
+- **Current implementation fact:** the runner stores its process lock at
+  `<RUNNER_STATE_DIR>/seo-audit-runner.lock` (`src/lock.js`). There is no
+  configuration option for a separate lock directory today.
+- **Target contract:** ephemeral PID/lock files belong in
+  `/run/seo-audit-runner/`. Reaching that target requires a runner code
+  change — a new `RUNNER_LOCK_DIR` setting (e.g.
+  `RUNNER_LOCK_DIR=/run/seo-audit-runner`) — which is a **Phase 4F
+  implementation item** with its own tests.
+- **Until that code change is implemented and tested, deployment scripts and
+  units MUST NOT pretend the runner supports it**: Phase 4B–4E artifacts
+  treat the lock as living in `/var/lib/seo-audit-runner/` (the state dir),
+  and `/run/seo-audit-runner/` is provisioned but unused. After Phase 4F,
+  `runner.env` gains `RUNNER_LOCK_DIR=/run/seo-audit-runner` explicitly.
 
 ## 3. User and permission model
 
 - Dedicated system user: `seo-runner` (`useradd --system --shell
-  /usr/sbin/nologin --home-dir /var/lib/seo-runner seo-runner`). No login, no
-  sudo, no membership in the app's groups.
+  /usr/sbin/nologin --home-dir /var/lib/seo-audit-runner seo-runner`). No
+  login, no sudo, no membership in the app's groups.
 - `seo-runner` can read: the installed release (world-readable code),
-  `/etc/seo-runner/env` (group read).
-- `seo-runner` can write: only `/var/lib/seo-runner/state` and
-  `/var/backups/seo-runner`.
-- Nothing in the runner requires root at runtime. Root is needed only for
-  install/upgrade (writing `/opt`, `/etc`, unit files).
+  `/etc/seo-audit-runner/runner.env` (group read).
+- `seo-runner` can write: only `/var/lib/seo-audit-runner/` (including
+  `backups/`) and — when file logging is chosen — `/var/log/seo-audit-runner/`.
+  `/run/seo-audit-runner/` is provisioned for it by systemd (see §2a).
+- Nothing in the runner requires root at runtime; normal runs are performed
+  as `seo-runner`, never root. Root is needed only for install/upgrade
+  (writing `/opt`, `/etc`, unit files) and administration.
 - Secrets (`SLACK_BOT_TOKEN` / `SLACK_WEBHOOK_URL`) exist only in
-  `/etc/seo-runner/env` (0640) — never in argv, unit files, SQLite, or logs
-  (the runner already redacts them in its logger).
+  `/etc/seo-audit-runner/runner.env` (0640) — never in argv, unit files,
+  SQLite, or logs (the runner already redacts them in its logger).
 
 ## 4. Scheduling contract
 
@@ -64,12 +97,14 @@ Notes:
   `Persistent=true`.
 - Hourly retry: `seo-runner-retry.timer` → `seo-runner-retry.service`
   (`retry-notifications`).
-- **Both timers ship disabled** (`systemctl enable` is never run by install
-  scripts). Enabling is a manual administrator action gated by
-  `docs/PRODUCTION_GATES.md` Gate 6/7.
+- **Both timers ship disabled.** Installation never enables scheduling
+  automatically. If a later phase adds an explicit administrator opt-in flag
+  (e.g. `--enable-timers`), it must still refuse to act unless the Gate 6/7
+  production validation in `docs/PRODUCTION_GATES.md` has been completed.
 - Timezone: either set the host to `Africa/Cairo`, or use
   `OnCalendar=*-*-* 03:00:00 Africa/Cairo` (systemd ≥ 235). Exactly one
-  scheduling mechanism per command per host (no cron + timer duplication).
+  scheduling mechanism per command per host — cron and systemd must never be
+  enabled for the same runner command simultaneously.
 - Cron fallback (documented, not installed): the two crontab lines shipped as
   `deploy/cron.example` in Phase 4C.
 
@@ -80,8 +115,9 @@ Notes:
 - Creates user, directories, and permissions exactly as §1/§3.
 - Copies `ops/seo-audit-runner/` (bin, src, package.json, README, docs) into a
   new release dir; **excludes** `state/`, `.env`, tests optional.
-- Writes `/etc/seo-runner/env` only from a provided template if absent; never
-  overwrites an existing env file.
+- Writes `/etc/seo-audit-runner/runner.env` only from a provided template if
+  absent; **an existing `runner.env` is always preserved, never overwritten**.
+  The template sets `RUNNER_STATE_DIR=/var/lib/seo-audit-runner`.
 - Installs systemd units (Phase 4C) but **never enables or starts timers**.
 - Ends by running `seo-audit-runner validate-config` as `seo-runner` and
   reporting the result. Install fails loudly if validation fails.
@@ -90,63 +126,85 @@ Notes:
 ## 6. Backup and restore contracts (Phase 4D)
 
 Backup (`backup.sh`):
-- Source: the state directory only (SQLite + `.backup-v*` + journals;
-  **never** the lock file, never `/etc/seo-runner/env` — config/secrets are
-  backed up separately by the operator's secret store).
-- Method: consistent SQLite copy — `sqlite3 <db> ".backup <dest>"` when the
-  sqlite3 CLI exists, otherwise `PRAGMA wal_checkpoint(TRUNCATE)` + file copy
-  via the runner's own Node runtime. Then tar the state dir snapshot with a
-  UTC timestamp into `/var/backups/seo-runner/`.
-- Runs a `PRAGMA quick_check` first and refuses to back up a database that
-  fails it (protects the backup set from silently rotating in corruption).
+- Source: the state directory `/var/lib/seo-audit-runner/` only — SQLite
+  database, migration `.backup-v*` files, and run journals. The backup must
+  NEVER contain: the active process lock file, `runner.env`, or any Slack
+  credential (credentials never enter the state dir; the SQLite file itself
+  stores no secrets). The `backups/` subdirectory is excluded from the
+  snapshot (no recursive backups of backups).
+- Database copy method, in order of preference:
+  1. **SQLite online backup API** — `sqlite3 <db> ".backup <dest>"`. This is
+     the ONLY method that may run while the runner is active: the backup API
+     is designed to produce a consistent copy alongside live readers/writers.
+  2. **Fallback: `PRAGMA wal_checkpoint(TRUNCATE)` + file copy** (via the
+     runner's own Node runtime when the sqlite3 CLI is absent). This method
+     is **NOT safe during a concurrent write** and must therefore first:
+     confirm the runner service is inactive (or acquire the runner lock
+     successfully), verify no active writer exists, and only then
+     checkpoint and copy.
+- A plain live `cp` of the database or its `-wal`/`-shm` files is never
+  acceptable and must not appear in any script or documentation.
+- Integrity gates: run `PRAGMA quick_check` on the SOURCE before backing up
+  (refuse to rotate a corrupt database into the backup set), and run
+  `PRAGMA quick_check` on the RESULTING copy before declaring the backup
+  successful.
+- Destination: timestamped (UTC) archive in `/var/lib/seo-audit-runner/backups/`,
+  owned `seo-runner:seo-runner`, directory mode 0700.
 - Retention: keep newest N (default 14); pruning deletes only files matching
-  the backup naming pattern inside `/var/backups/seo-runner/`.
-- Safe while the runner is running (WAL + `.backup`/checkpoint semantics), but
-  the scheduled backup should avoid the 03:00 audit window.
+  the backup naming pattern inside `/var/lib/seo-audit-runner/backups/`.
+- Scheduled backups should avoid the 03:00 Africa/Cairo audit window.
 
 Restore (`restore.sh`):
-- Refuses to run while the service is active or the state-dir lock is held.
-- Never deletes existing state: renames the current state dir to
-  `state.pre-restore-<stamp>` and restores the chosen backup into a fresh dir,
-  then swaps atomically.
+- Requires the runner to be inactive: refuses to run while the service is
+  active or the state-dir lock is held.
+- Validates the chosen backup BEFORE replacement: extracts to a scratch
+  location and runs `PRAGMA quick_check` on the backup's database; a failing
+  backup is never restored.
+- Makes a safety backup of the current state first: renames the current
+  state contents to `state.pre-restore-<stamp>` (never deletes them), then
+  restores the validated backup into a fresh directory and swaps atomically.
 - Ends with `seo-audit-runner status` to prove the restored DB opens and
   migrates cleanly.
-- Rollback of a bad restore = swap the renamed directory back.
+- The application PostgreSQL database is completely untouched by backup and
+  restore — these procedures operate only on the runner's own SQLite state.
+- Rollback of a bad restore = swap the `state.pre-restore-<stamp>` directory
+  back.
 
 ## 7. Upgrade and rollback contracts (Phase 4E)
 
 Upgrade (`upgrade.sh`):
-1. `backup.sh` (mandatory; abort on failure),
+1. `backup.sh` (mandatory pre-upgrade backup; abort on failure),
 2. install the new code as a new `releases/<stamp>/`,
 3. flip `current` symlink,
 4. run `validate-config` (which also applies any runner SQLite migrations —
    these are versioned, transactional, and take their own pre-migration
-   `.backup-v<N>` copy),
+   `.backup-v<N>` copy inside the state dir),
 5. on any failure: flip the symlink back and report — automatic code rollback.
-- State is never modified by upgrade except through the runner's own
-  migrations.
+- State in `/var/lib/seo-audit-runner/` is never modified by upgrade except
+  through the runner's own migrations.
 
 Rollback (`rollback.sh`):
 - Flips `current` to the previous release directory. Code-only, instant.
-- SQLite schema is NOT downgraded. Policy: rolling back code across a runner
-  schema-version bump additionally requires restoring the matching state
-  backup (the migration's `.backup-v<N>` or the pre-upgrade backup from step 1).
-  The script must detect a schema version newer than the rolled-back code
-  supports and instruct the operator instead of guessing.
+- SQLite schema is NOT blindly downgraded. Policy: rolling back code across a
+  runner schema-version bump additionally requires restoring the matching
+  state backup (the migration's `.backup-v<N>` or the pre-upgrade backup from
+  step 1). The script must detect a schema version newer than the rolled-back
+  code supports and instruct the operator instead of guessing.
 
 ## 8. Uninstall and purge contracts (Phase 4E)
 
 Uninstall (`uninstall.sh`) — non-destructive:
 - Stops and disables units, removes unit files, removes `/opt/seo-audit-runner`
   and the wrapper.
-- **Preserves**: `/var/lib/seo-runner/state`, `/var/backups/seo-runner`,
-  `/etc/seo-runner/env`, and the `seo-runner` user.
+- **Preserves**: `/var/lib/seo-audit-runner/` (state AND `backups/`),
+  `/etc/seo-audit-runner/runner.env`, `/var/log/seo-audit-runner/` (any
+  operator log files), and the `seo-runner` user.
 - Prints exactly what was kept and where.
 
 Purge (`purge.sh`) — explicit destruction:
 - Requires an unambiguous flag (e.g. `--yes-delete-state`).
 - Takes a final backup to a location the operator names, then removes state,
-  backups dir, env file, and optionally the user.
+  backups, config, and log directories, and optionally the user.
 - Never runs as part of uninstall, upgrade, or any automated flow.
 
 ## 9. Validation before and after any host change
@@ -162,8 +220,9 @@ Repeat these read-only checks before and after every deployment action
 
 ## 10. Line endings
 
-Every file under `ops/seo-audit-runner/` is LF (enforced by
-`.gitattributes`). Shell scripts, systemd units, cron/logrotate examples, and
-env templates are explicitly pinned `eol=lf`; a CRLF script or unit file is a
-deployment-blocking defect, checked in Gate 3 (`bash -n` + a byte-level CRLF
-scan).
+Every file under `ops/seo-audit-runner/` is LF in the repository (enforced by
+`.gitattributes`). Forced-LF working-tree rules cover `*.sh`, `*.service`,
+`*.timer`, `cron.example`, `logrotate.example`, `*.env.example`, and
+`bin/seo-audit-runner.js` (the shebang entrypoint). A CRLF script or unit
+file is a deployment-blocking defect, checked in Gate 3 (`bash -n` + a
+byte-level CRLF scan).
