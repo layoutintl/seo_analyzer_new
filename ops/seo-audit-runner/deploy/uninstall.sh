@@ -9,8 +9,19 @@
 # and the seo-runner user. State deletion exists only in deploy/purge.sh
 # behind an explicit flag.
 #
+# Deletion-safety contract (deploy/path-safety.sh): the one recursive
+# deletion here (the /opt code tree) is canonicalized, must match the
+# fixed approved path (or <destdir> + suffix in the staged test mode),
+# must contain no symlinked components, must carry the runner ownership
+# sentinel, and is re-validated immediately before rm. Environment
+# variables never redirect it.
+#
 # Staged-test overrides: --destdir (systemctl is skipped when unavailable).
 set -Eeuo pipefail
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=path-safety.sh
+. "$SCRIPT_DIR/path-safety.sh"
 
 DESTDIR=
 
@@ -36,10 +47,32 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-OPT_DIR=$DESTDIR/opt/seo-audit-runner
-WRAPPER=$DESTDIR/usr/local/bin/seo-audit-runner
-SYSTEMD_DIR=$DESTDIR/etc/systemd/system
+# ── Mode selection: fixed production paths, or validated DESTDIR ───
+MODE=production
+DESTDIR_CANON=
+if [ -n "$DESTDIR" ]; then
+  MODE=destdir
+  DESTDIR_CANON=$(psafe_validate_destdir "$DESTDIR") \
+    || fail "--destdir failed the staging-root validation — nothing was removed"
+fi
+
+if [ "$MODE" = production ]; then
+  OPT_DIR=/opt/seo-audit-runner
+  WRAPPER=/usr/local/bin/seo-audit-runner
+  SYSTEMD_DIR=/etc/systemd/system
+else
+  OPT_DIR=$DESTDIR_CANON/opt/seo-audit-runner
+  WRAPPER=$DESTDIR_CANON/usr/local/bin/seo-audit-runner
+  SYSTEMD_DIR=$DESTDIR_CANON/etc/systemd/system
+fi
 UNITS='seo-audit-runner.timer seo-audit-runner.service seo-runner-retry.timer seo-runner-retry.service seo-runner-tick.timer seo-runner-tick.service'
+
+# ── Validate the one recursive deletion target BEFORE any change ───
+OPT_CANON=
+if [ -e "$OPT_DIR" ] || [ -L "$OPT_DIR" ]; then
+  OPT_CANON=$(psafe_validate_delete_target opt "$MODE" "$OPT_DIR" "$DESTDIR_CANON") \
+    || fail "refusing to remove $OPT_DIR — it failed the deletion-safety validation; nothing was removed"
+fi
 
 # ── Stop and disable units first (real systemd hosts only) ─────────
 if [ -z "$DESTDIR" ] && command -v systemctl >/dev/null 2>&1; then
@@ -51,31 +84,36 @@ fi
 
 # ── Remove unit files, wrapper, code ───────────────────────────────
 removed_units=0
-for unit in $UNITS; do
-  if [ -f "$SYSTEMD_DIR/$unit" ]; then
-    rm -f -- "$SYSTEMD_DIR/$unit"
-    removed_units=$((removed_units + 1))
-  fi
-done
+if [ -d "$SYSTEMD_DIR" ]; then
+  psafe_no_symlink_components "$SYSTEMD_DIR" \
+    || fail "systemd unit directory $SYSTEMD_DIR contains a symlinked component — refusing to remove unit files"
+  for unit in $UNITS; do
+    if [ -f "$SYSTEMD_DIR/$unit" ]; then
+      rm -f -- "$SYSTEMD_DIR/$unit"
+      removed_units=$((removed_units + 1))
+    fi
+  done
+fi
 [ "$removed_units" -gt 0 ] && log "removed $removed_units systemd unit file(s) from $SYSTEMD_DIR"
 
 if [ -z "$DESTDIR" ] && command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload >/dev/null 2>&1 || true
 fi
 
-if [ -e "$WRAPPER" ]; then
+if [ -e "$WRAPPER" ] || [ -L "$WRAPPER" ]; then
   rm -f -- "$WRAPPER"
   log "removed command wrapper $WRAPPER"
 fi
 
-if [ -d "$OPT_DIR" ]; then
-  rm -rf -- "$OPT_DIR"
-  log "removed $OPT_DIR (code, releases, isolated Node runtime)"
+if [ -n "$OPT_CANON" ]; then
+  psafe_rm_rf opt "$MODE" "$OPT_CANON" "$DESTDIR_CANON" \
+    || fail "pre-deletion re-validation failed for $OPT_CANON — code tree NOT removed"
+  log "removed $OPT_CANON (code, releases, isolated Node runtime)"
 fi
 
 # ── Report exactly what was kept ───────────────────────────────────
 log "uninstall complete. PRESERVED (delete only via deploy/purge.sh):"
-log "  state + backups: $DESTDIR/var/lib/seo-audit-runner"
-log "  configuration:   $DESTDIR/etc/seo-audit-runner (runner.env kept)"
-log "  logs:            $DESTDIR/var/log/seo-audit-runner"
+log "  state + backups: ${DESTDIR_CANON}/var/lib/seo-audit-runner"
+log "  configuration:   ${DESTDIR_CANON}/etc/seo-audit-runner (runner.env kept)"
+log "  logs:            ${DESTDIR_CANON}/var/log/seo-audit-runner"
 log "  system user:     seo-runner"

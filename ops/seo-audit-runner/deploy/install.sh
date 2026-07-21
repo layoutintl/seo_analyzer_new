@@ -29,6 +29,11 @@ set -Eeuo pipefail
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 DEFAULT_SOURCE=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 
+# Sentinel constants (PSAFE_SENTINEL_NAME/HEADER) for the deletion-safety
+# contract used by purge.sh/uninstall.sh.
+# shellcheck source=path-safety.sh
+. "$SCRIPT_DIR/path-safety.sh"
+
 RUNNER_USER=seo-runner
 DESTDIR=
 SOURCE_DIR=$DEFAULT_SOURCE
@@ -219,6 +224,22 @@ ensure_dir "$RUN_DIR"          0750 "$RUNNER_USER:$RUNNER_USER"
 # /usr/local/bin is a shared system directory: create it if missing, but
 # never change its mode or ownership.
 mkdir -p -- "$BIN_DIR"
+
+# ── Ownership sentinels (deletion-safety contract) ─────────────────
+# purge.sh/uninstall.sh refuse to recursively delete any directory that
+# does not carry a valid role sentinel. Stamped idempotently on every
+# install; content is fixed, permissions follow the directory's owner.
+write_sentinel() { # <dir> <role> <mode> <owner:group>
+  sentinel_tmp=$1/$PSAFE_SENTINEL_NAME.tmp.$$
+  printf '%s\nrole=%s\n' "$PSAFE_SENTINEL_HEADER" "$2" > "$sentinel_tmp"
+  chmod "$3" -- "$sentinel_tmp"
+  maybe_chown "$4" "$sentinel_tmp"
+  mv -f -- "$sentinel_tmp" "$1/$PSAFE_SENTINEL_NAME"
+}
+write_sentinel "$OPT_DIR"   opt   0644 root:root
+write_sentinel "$ETC_DIR"   etc   0644 root:root
+write_sentinel "$STATE_DIR" state 0600 "$RUNNER_USER:$RUNNER_USER"
+write_sentinel "$LOG_DIR"   log   0640 "$RUNNER_USER:$RUNNER_USER"
 
 # ── Isolated Node runtime (copy of the validated binary) ───────────
 if [ "$NODE_BIN" = "$NODE_DST" ]; then
