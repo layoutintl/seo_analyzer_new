@@ -39,13 +39,32 @@ CREATE TABLE IF NOT EXISTS seo_analyses (
 
 ALTER TABLE seo_analyses ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY "Anyone can read SEO analyses"
-  ON seo_analyses
-  FOR SELECT
-  USING (true);
+-- Policies are created conditionally so this migration also applies on
+-- plain PostgreSQL (Docker, Railway, dublyo, ...) where the Supabase
+-- "authenticated" role does not exist. On such servers the app connects
+-- as the table owner, which RLS does not restrict, so skipping the
+-- Supabase-specific policy loses nothing.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE tablename = 'seo_analyses' AND policyname = 'Anyone can read SEO analyses'
+  ) THEN
+    CREATE POLICY "Anyone can read SEO analyses"
+      ON seo_analyses
+      FOR SELECT
+      USING (true);
+  END IF;
 
-CREATE POLICY "Authenticated users can insert analyses"
-  ON seo_analyses
-  FOR INSERT
-  TO authenticated
-  WITH CHECK (true);
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated')
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_policies
+       WHERE tablename = 'seo_analyses' AND policyname = 'Authenticated users can insert analyses'
+     ) THEN
+    CREATE POLICY "Authenticated users can insert analyses"
+      ON seo_analyses
+      FOR INSERT
+      TO authenticated
+      WITH CHECK (true);
+  END IF;
+END $$;
