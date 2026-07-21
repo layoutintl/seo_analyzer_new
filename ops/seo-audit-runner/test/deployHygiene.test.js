@@ -22,6 +22,7 @@ const SHELL_SCRIPTS = [
   'rollback.sh',
   'uninstall.sh',
   'purge.sh',
+  'path-safety.sh',
   'smoke-test.sh',
 ].map(DEPLOY);
 
