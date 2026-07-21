@@ -23,8 +23,11 @@ WORKDIR /app
 ENV NODE_ENV=production
 # Force IPv4 DNS — container networks on Dublyo don't support IPv6
 ENV NODE_OPTIONS="--dns-result-order=ipv4first"
-# Accept self-signed TLS certs (Dublyo PostgreSQL uses a self-signed certificate)
-ENV NODE_TLS_REJECT_UNAUTHORIZED=0
+# NOTE: no NODE_TLS_REJECT_UNAUTHORIZED=0 here. Self-signed PostgreSQL
+# certificates are accepted by the narrowly scoped `ssl` config inside
+# backend/src/lib/db.ts and scripts/migrate.js (sslmode-aware,
+# rejectUnauthorized:false for the DB connection only). All other outbound
+# TLS (audited sites, APIs) is verified normally.
 
 # pg (node-postgres) needs libpq for native bindings
 RUN apk add --no-cache postgresql-client
@@ -36,12 +39,13 @@ COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 # Copy built artifacts from builder stage
+# .env is deliberately NOT copied — the platform injects DATABASE_URL and
+# friends; baking credentials into the image is a leak vector.
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/backend/dist ./backend/dist
 COPY --from=builder /app/server ./server
 COPY --from=builder /app/scripts ./scripts
 COPY --from=builder /app/supabase ./supabase
-COPY --from=builder /app/.env ./.env
 
 # Expose the default port
 EXPOSE 3000

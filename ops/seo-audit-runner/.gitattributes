@@ -1,0 +1,26 @@
+# Line-ending policy for the SEO audit runner.
+#
+# Everything the runner ships to a Linux host MUST be LF in the working tree,
+# regardless of the contributor's core.autocrlf setting. A CRLF shebang line
+# breaks `#!/usr/bin/env node` and every shell script.
+
+# Default: normalize all text files in this directory tree.
+* text=auto
+
+# Linux-executed artifacts: force LF in the working tree on every platform.
+*.sh            text eol=lf
+*.service       text eol=lf
+*.timer         text eol=lf
+cron.example    text eol=lf
+logrotate.example text eol=lf
+*.env.example   text eol=lf
+.env.example    text eol=lf
+
+# The Node CLI and sources: the bin entrypoint carries a shebang and is
+# executed directly on Linux; keep every JS file LF so installs are
+# byte-identical across platforms.
+*.js            text eol=lf
+*.json          text eol=lf
+
+# Documentation.
+*.md            text eol=lf

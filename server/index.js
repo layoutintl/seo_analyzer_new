@@ -33,12 +33,6 @@ try {
   // No .env file — rely on platform-injected environment variables (normal in production)
 }
 
-// Hard-coded fallback: used when .env file is not available in the container
-if (!process.env.DATABASE_URL) {
-  process.env.DATABASE_URL = 'postgresql://postgres.cltnpsfbxlyjikzyllxy:HdcvS57wmDMviDvV@aws-1-eu-central-1.pooler.supabase.com:5432/postgres';
-  console.log('[env] Using hard-coded DATABASE_URL fallback');
-}
-
 // --------------- Debug: log which DB-related env vars are present ---------------
 const _dbVars = Object.keys(process.env).filter(k =>
   k.includes('DATABASE') || k.includes('POSTGRES') || k.includes('PG_')
@@ -93,14 +87,61 @@ app.get('/health', async (_req, res) => {
 });
 
 // --------------- API routes ---------------
+
+// Readiness probe: is the DB reachable and is the schema actually usable?
+// Result is cached for 30s so the public endpoint never hammers the pool.
+// `to_regclass` is a catalog lookup — no table scan, safe on every check.
+const DB_READY_CACHE_MS = 30_000;
+let _dbReadyCache = { at: 0, connected: false, schemaReady: false };
+let _getDbFn = null;
+
+async function checkDbReadiness() {
+  if (!process.env.DATABASE_URL) {
+    return { configured: false, connected: false, schemaReady: false };
+  }
+  const now = Date.now();
+  if (now - _dbReadyCache.at < DB_READY_CACHE_MS) {
+    return { configured: true, connected: _dbReadyCache.connected, schemaReady: _dbReadyCache.schemaReady };
+  }
+  let connected = false;
+  let schemaReady = false;
+  try {
+    if (!_getDbFn) {
+      ({ getDb: _getDbFn } = await import('../backend/dist/lib/db.js'));
+    }
+    const db = _getDbFn();
+    if (db) {
+      const r = await db.query("SELECT to_regclass('public.sites') IS NOT NULL AS ready");
+      connected = true;
+      schemaReady = r.rows[0]?.ready === true;
+    }
+  } catch (err) {
+    console.error('[health] DB readiness check failed:', err.message);
+  }
+  _dbReadyCache = { at: now, connected, schemaReady };
+  return { configured: true, connected, schemaReady };
+}
+
 app.get('/api/health', async (_req, res) => {
   const dbUrl = process.env.DATABASE_URL;
   let dbHost = null;
   if (dbUrl) {
     try { dbHost = new URL(dbUrl).hostname; } catch { dbHost = 'configured'; }
   }
-  res.json({
-    status: 'ok',
+
+  const db = await checkDbReadiness();
+  // Not configured = intentional in-memory mode → still healthy.
+  // Configured but unreachable/schema missing = not ready → 503.
+  const ready = !db.configured || (db.connected && db.schemaReady);
+
+  res.status(ready ? 200 : 503).json({
+    status: ready ? 'ok' : 'degraded',
+    database: {
+      configured: db.configured,
+      connected: db.connected,
+      schemaReady: db.schemaReady,
+      host: dbHost,
+    },
     env: {
       DB_CONFIGURED: !!dbUrl,
       DB_HOST: dbHost,
@@ -128,7 +169,13 @@ if (DATABASE_URL) {
     _execSync('node scripts/migrate.js', { cwd: join(__dirname, '..'), stdio: 'inherit' });
     console.log('Migrations complete.');
   } catch (migrateErr) {
-    console.error('Migration failed — server will continue but DB features may not work:', migrateErr.message);
+    // A server that accepts traffic without its schema returns 500 on every
+    // DB endpoint and hides the real problem. Fail loudly instead — the
+    // platform restarts the container and each attempt logs the same clear
+    // error until the database or DATABASE_URL is fixed.
+    console.error('FATAL: database migrations failed:', migrateErr.message);
+    console.error('Refusing to start with an unusable schema. Fix DATABASE_URL or the database and redeploy.');
+    process.exit(1);
   }
 }
 
