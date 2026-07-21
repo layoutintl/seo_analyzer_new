@@ -38,8 +38,10 @@ without recorded evidence (command output pasted into the phase review).
 - Full runner suite green: `cd ops/seo-audit-runner && npm test`
   (baseline 186; new phases may only add tests, never break existing ones).
 - Shell syntax: `bash -n` / `sh -n` on every `deploy/*.sh`.
-- CRLF scan: no `\r` bytes in any `*.sh`, `*.service`, `*.timer`,
-  `cron.example`, `*.env.example` under `ops/seo-audit-runner/`.
+- CRLF/LF scan: no `\r` bytes in any of the following under
+  `ops/seo-audit-runner/` (byte-level check, matching `.gitattributes`):
+  `*.sh`, `*.service`, `*.timer`, `cron.example`, `logrotate.example`,
+  `*.env.example`, `bin/seo-audit-runner.js`.
 - systemd validation: `systemd-analyze verify` on all units and
   `systemd-analyze calendar` on every `OnCalendar=` expression (requires a
   Linux host or container; this step is deferred to Gate 5 when developing on
@@ -89,10 +91,12 @@ When unblocked, the sequence is strict and manual:
 7. `seo-audit-runner run --all --dry-run` — read-only planning only.
 8. `seo-audit-runner run --project <the one approved project>` — the single
    controlled production audit, watched live.
-9. Review results, Slack output, state DB, and app health.
-10. Only after review may the administrator consider enabling the daily timer
-    (a separate explicit `systemctl enable --now` decision, plus the hourly
-    retry timer).
+9. Review results, Slack output, state DB, and app health/load.
+10. Only after that review may the administrator consider enabling the daily
+    timer (a separate explicit `systemctl enable --now` decision, plus the
+    hourly retry timer). A production `run --all` is not permitted — by
+    timer or by hand — before the step-8 controlled project audit has been
+    reviewed and approved.
 
 ## Gate 7 — Post-install monitoring (first week after enabling)
 

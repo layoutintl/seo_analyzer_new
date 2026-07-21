@@ -1,26 +1,25 @@
 # Line-ending policy for the SEO audit runner.
 #
-# Everything the runner ships to a Linux host MUST be LF in the working tree,
+# Everything the runner ships to a Linux host MUST be LF in the repository,
 # regardless of the contributor's core.autocrlf setting. A CRLF shebang line
 # breaks `#!/usr/bin/env node` and every shell script.
 
-# Default: normalize all text files in this directory tree.
+# Default: normalize all text files in this directory tree (LF in the repo).
 * text=auto
 
 # Linux-executed artifacts: force LF in the working tree on every platform.
-*.sh            text eol=lf
-*.service       text eol=lf
-*.timer         text eol=lf
-cron.example    text eol=lf
+*.sh              text eol=lf
+*.service         text eol=lf
+*.timer           text eol=lf
+cron.example      text eol=lf
 logrotate.example text eol=lf
-*.env.example   text eol=lf
-.env.example    text eol=lf
+*.env.example     text eol=lf
 
-# The Node CLI and sources: the bin entrypoint carries a shebang and is
-# executed directly on Linux; keep every JS file LF so installs are
-# byte-identical across platforms.
-*.js            text eol=lf
-*.json          text eol=lf
-
-# Documentation.
-*.md            text eol=lf
+# The CLI entrypoint carries a `#!/usr/bin/env node` shebang and is executed
+# directly on Linux — a CRLF first line breaks it, so it gets an explicit
+# forced-LF rule. Broader `*.js` / `*.json` / `*.md` eol rules are
+# deliberately NOT used: releases are installed from a git checkout on the
+# Linux host (which materializes LF from the normalized repository content),
+# and Node parses CRLF in ordinary source files anyway — only the shebang
+# line is execution-critical.
+bin/seo-audit-runner.js text eol=lf
